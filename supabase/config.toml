@@ -1,0 +1,6 @@
+project_id = "personal-notes"
+
+[functions.notify]
+# Database Webhooks authenticate with a dedicated x-webhook-secret instead.
+verify_jwt = false
+entrypoint = "./functions/notify/index.ts"
