@@ -20,7 +20,7 @@ export default defineConfig({
         { src: 'icon-maskable.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
       ],
       share_target: { action: `${base}share`, method: 'POST', enctype: 'multipart/form-data',
-        params: { title: 'title', text: 'text', url: 'url', files: [{ name: 'images', accept: ['image/png', 'image/jpeg', 'image/webp'] }] } },
+        params: { title: 'title', text: 'text', url: 'url', files: [{ name: 'images', accept: ['image/png', 'image/jpeg', 'image/webp', '.png', '.jpg', '.jpeg', '.webp'] }] } },
     },
   })],
   optimizeDeps: { exclude: ['@jsquash/webp'] },

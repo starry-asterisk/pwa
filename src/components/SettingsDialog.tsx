@@ -7,7 +7,7 @@ import type { CloudConfig } from '../types'
 import { db, formatBytes, requestDurableStorage } from '../lib/db'
 import { exportBackup, importBackup } from '../lib/backup'
 import { sendMagicLink } from '../lib/cloud'
-import { disablePush, enablePush, supportsPush } from '../lib/notifications'
+import { disablePush, enablePush, preparePush, supportsPush, verifyPushRegistration, type PushEnrollmentStage, type PushPreparation } from '../lib/notifications'
 
 interface Props {
   config: CloudConfig
@@ -29,6 +29,12 @@ const tabs = [
   { id: 'sync' as const, label: '동기화', icon: Cloud },
   { id: 'notifications' as const, label: '알림', icon: Bell },
 ]
+type PushServerStatus = 'unknown' | 'checking' | 'registered' | 'missing' | 'unavailable' | 'error'
+interface PushContext { client: SupabaseClient | null; ownerId: string | null; authenticated: boolean; online: boolean }
+const pushStageLabels: Record<PushEnrollmentStage, string> = {
+  permission: '알림 권한 확인 중…', browser: '브라우저 알림 준비 중…',
+  server: '서버에 기기 등록 중…', verify: '서버 등록 확인 중…',
+}
 
 export default function SettingsDialog({ config, client, user, authenticated, onSignOut, onSaveConfig, onClose, notify, onSync, onAdopt, syncing }: Props) {
   const dialogId = useId()
@@ -43,13 +49,28 @@ export default function SettingsDialog({ config, client, user, authenticated, on
   const [mailSent, setMailSent] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
   const [persistent, setPersistent] = useState(false)
-  const [pushActive, setPushActive] = useState(false)
+  const [localPush, setLocalPush] = useState(false)
+  const [online, setOnline] = useState(navigator.onLine)
+  const [pushChecking, setPushChecking] = useState(false)
+  const [pushStage, setPushStage] = useState<PushEnrollmentStage | null>(null)
+  const [pushError, setPushError] = useState('')
+  const pushErrorSource = useRef<'prepare' | 'verify' | 'mutation' | null>(null)
+  const [pushServer, setPushServer] = useState<{ client: SupabaseClient | null; ownerId: string | null; status: PushServerStatus }>({ client: null, ownerId: null, status: 'unknown' })
+  const preparedPush = useRef<PushPreparation | null>(null)
+  const pushSequence = useRef(0)
+  const pushAlive = useRef(true)
+  const pushJob = useRef<symbol | null>(null)
+  const refreshPush = useRef<(clearError?: boolean) => Promise<void>>(async () => {})
   const [permission, setPermission] = useState<NotificationPermission | 'unsupported'>(
     typeof Notification === 'undefined' ? 'unsupported' : Notification.permission,
   )
   const pushSupported = supportsPush()
   const occupied = busy !== null
   const ownerId = user?.id ?? null
+  const pushContext = useRef<PushContext>({ client, ownerId, authenticated, online })
+  pushContext.current = { client, ownerId, authenticated, online }
+  const pushServerStatus = pushServer.client === client && pushServer.ownerId === ownerId ? pushServer.status : 'unknown'
+  const pushRegistered = pushServerStatus === 'registered' && localPush && permission === 'granted' && authenticated && online
   const stats = useLiveQuery(() => db.transaction('r', db.notes, db.images, async () => {
     const notes = await db.notes.filter(note => note.cloudOwnerId === null
       || ownerId !== null && note.cloudOwnerId === ownerId).toArray()
@@ -62,21 +83,126 @@ export default function SettingsDialog({ config, client, user, authenticated, on
   useEffect(() => { setDraft(config); setVapidKey(config.vapidPublicKey) }, [config])
 
   useEffect(() => {
-    let mounted = true
-    void navigator.storage?.persisted?.().then(value => { if (mounted) setPersistent(value) }).catch(() => {})
-    const refreshPush = async () => {
-      if (typeof Notification !== 'undefined' && mounted) setPermission(Notification.permission)
-      if (!pushSupported) return
+    pushAlive.current = true
+    void navigator.storage?.persisted?.().then(value => { if (pushAlive.current) setPersistent(value) }).catch(() => {})
+    return () => { pushAlive.current = false; pushSequence.current++ }
+  }, [])
+
+  function samePushContext(context: PushContext): boolean {
+    const current = pushContext.current
+    return pushAlive.current && current.client === context.client && current.ownerId === context.ownerId
+      && current.authenticated === context.authenticated && current.online === context.online
+  }
+
+  useEffect(() => {
+    let active = true
+    setPushError('')
+    pushErrorSource.current = null
+    const refresh = async (clearError = false) => {
+      // Permission dialogs can refocus the page during enrollment; leave that operation in control.
+      if (pushJob.current) return
+      const sequence = ++pushSequence.current
+      const context = pushContext.current
+      const current = () => active && sequence === pushSequence.current && samePushContext(context)
+      const setStatus = (status: PushServerStatus) => setPushServer({ client: context.client, ownerId: context.ownerId, status })
+      if (clearError) { setPushError(''); pushErrorSource.current = null }
+      if (typeof Notification !== 'undefined') setPermission(Notification.permission)
+      setPushChecking(true)
+      preparedPush.current = null
+      let phase: 'prepare' | 'verify' = 'prepare'
       try {
-        const registration = await navigator.serviceWorker.getRegistration()
-        const subscription = await registration?.pushManager.getSubscription()
-        if (mounted) setPushActive(Boolean(subscription))
-      } catch { /* The browser can restrict push availability before installation. */ }
+        const prepared = await preparePush()
+        if (!current()) return
+        preparedPush.current = prepared
+        setLocalPush(Boolean(prepared.subscription))
+        if (pushErrorSource.current === 'prepare') { setPushError(''); pushErrorSource.current = null }
+        if (!pushSupported || !context.client || !context.ownerId || !context.authenticated || !context.online || !navigator.onLine) {
+          setStatus('unavailable')
+        } else if (!prepared.subscription) {
+          setStatus('missing')
+        } else {
+          setStatus('checking')
+          phase = 'verify'
+          const registered = await verifyPushRegistration(context.client, prepared.subscription, context.ownerId)
+          if (!current()) return
+          setStatus(registered ? 'registered' : 'missing')
+          if (registered) { setPushError(''); pushErrorSource.current = null }
+        }
+      } catch (error) {
+        if (!current()) return
+        setStatus('error')
+        if (pushErrorSource.current !== 'mutation') {
+          pushErrorSource.current = phase
+          setPushError(error instanceof Error ? error.message : '알림 등록을 확인하지 못했습니다. 다시 시도해 주세요.')
+        }
+      } finally { if (current()) setPushChecking(false) }
     }
-    void refreshPush()
-    window.addEventListener('focus', refreshPush)
-    return () => { mounted = false; window.removeEventListener('focus', refreshPush) }
-  }, [pushSupported])
+    refreshPush.current = refresh
+    const updateOnline = () => setOnline(navigator.onLine)
+    const onFocus = () => { updateOnline(); void refresh() }
+    const onWorkerChange = () => { void refresh() }
+    const subscription = client?.auth.onAuthStateChange(() => { queueMicrotask(() => { if (active) void refresh() }) }).data.subscription
+    void refresh()
+    window.addEventListener('focus', onFocus)
+    window.addEventListener('online', updateOnline)
+    window.addEventListener('offline', updateOnline)
+    navigator.serviceWorker?.addEventListener('controllerchange', onWorkerChange)
+    return () => {
+      active = false
+      pushSequence.current++
+      subscription?.unsubscribe()
+      window.removeEventListener('focus', onFocus)
+      window.removeEventListener('online', updateOnline)
+      window.removeEventListener('offline', updateOnline)
+      navigator.serviceWorker?.removeEventListener('controllerchange', onWorkerChange)
+    }
+  }, [client, ownerId, authenticated, online, pushSupported])
+
+  function changePush(enable: boolean) {
+    const context = pushContext.current
+    if (occupied || pushJob.current || !context.client || !context.ownerId || !context.authenticated || !context.online || !navigator.onLine) return
+    const prepared = preparedPush.current
+    if (enable && !prepared?.registration?.active) {
+      pushErrorSource.current = 'prepare'
+      setPushError('앱의 알림 준비를 다시 확인한 뒤 등록해 주세요.')
+      return
+    }
+    const job = Symbol('push-change')
+    pushJob.current = job
+    pushSequence.current++
+    setPushChecking(false)
+    setPushError('')
+    pushErrorSource.current = null
+    setBusy(enable ? 'push-enable' : 'push-disable')
+    const current = () => pushJob.current === job && samePushContext(context)
+    // Do not await preparation here: subscribe/requestPermission must begin in this click.
+    const operation = enable ? enablePush(context.client, config.vapidPublicKey, {
+      prepared: prepared ?? undefined,
+      expectedOwnerId: context.ownerId,
+      onStage: stage => { if (current()) setPushStage(stage) },
+    }) : disablePush(context.client, context.ownerId)
+    void operation.then(() => {
+      if (!current()) return
+      setLocalPush(enable)
+      setPushServer({ client: context.client, ownerId: context.ownerId, status: enable ? 'registered' : 'missing' })
+      notify(enable ? '서버 등록을 확인했습니다. 이 기기로 새 메모 알림을 받습니다.' : '이 기기의 알림을 껐습니다.')
+    }).catch((error: unknown) => {
+      if (!current()) return
+      const message = error instanceof Error ? error.message : '알림 설정을 변경하지 못했습니다. 다시 시도해 주세요.'
+      setPushServer({ client: context.client, ownerId: context.ownerId, status: 'error' })
+      pushErrorSource.current = 'mutation'
+      setPushError(message)
+      notify(message)
+    }).finally(() => {
+      if (pushJob.current !== job) return
+      pushJob.current = null
+      if (!pushAlive.current) return
+      setBusy(null)
+      setPushStage(null)
+      if (typeof Notification !== 'undefined') setPermission(Notification.permission)
+      void refreshPush.current()
+    })
+  }
 
   useEffect(() => {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
@@ -122,6 +248,9 @@ export default function SettingsDialog({ config, client, user, authenticated, on
   const permissionLabel = permission === 'unsupported' ? '이 브라우저에서 지원하지 않음'
     : permission === 'denied' ? '브라우저에서 차단됨'
       : permission === 'granted' ? '알림 권한 허용됨' : '아직 알림을 허용하지 않음'
+  const pushStatusLabel = pushServerStatus === 'registered' ? '서버 등록 완료'
+    : pushChecking || pushServerStatus === 'checking' ? '서버 확인 중…'
+      : pushServerStatus === 'missing' ? '서버 미등록' : '서버 확인 필요'
 
   return <div className="modal-backdrop settings-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
     <section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby={`${dialogId}-title`} ref={dialog} tabIndex={-1}>
@@ -229,17 +358,20 @@ export default function SettingsDialog({ config, client, user, authenticated, on
 
           {tab === 'notifications' && <>
             <section className="settings-section">
-              <div className="settings-section-heading"><h3>다른 기기의 새 메모 알림</h3><span className={`settings-status${pushActive && permission === 'granted' ? ' connected' : ''}`}>{pushActive && permission === 'granted' ? '이 기기에서 켜짐' : '꺼짐'}</span></div>
+              <div className="settings-section-heading"><h3>다른 기기의 새 메모 알림</h3><span className={`settings-status${pushRegistered ? ' connected' : ''}`} role="status">{pushStatusLabel}</span></div>
               <p className="settings-help">다른 기기에서 새 메모를 만들면 이 기기로 알려드립니다.</p>
               <div className="settings-callout"><Bell size={18} /><span>{permissionLabel}</span></div>
-              {!authenticated && <p className="settings-help">온라인에서 로그인을 확인한 뒤 알림을 켤 수 있습니다.</p>}
+              <p className="settings-help">{localPush ? '이 브라우저에 알림 구독이 있습니다.' : '이 브라우저에 알림 구독이 없습니다.'} 서버 등록이 완료되어야 새 메모 알림을 받을 수 있습니다.</p>
+              {(!authenticated || !online) && <p className="settings-help">온라인에서 로그인을 확인한 뒤 서버 등록을 확인하고 알림을 켤 수 있습니다.</p>}
+              {pushError && <p className="settings-callout" role="alert">{pushError}</p>}
+              {pushStage && <p className="settings-help" role="status">{pushStageLabels[pushStage]}</p>}
               <div className="settings-actions">
-                <button type="button" className="button primary" disabled={occupied || !client || !user || !authenticated || !pushSupported || !config.vapidPublicKey.trim() || permission === 'denied'} onClick={() => {
-                  if (client) void run('push-enable', async () => { await enablePush(client, config.vapidPublicKey); setPushActive(true) }, '이 기기의 새 메모 알림을 켰습니다.')
-                }}><Bell size={16} />{busy === 'push-enable' ? '알림 켜는 중…' : '이 기기에서 알림 켜기'}</button>
-                <button type="button" className="button secondary" disabled={occupied || !client || !user || !authenticated || !pushSupported || !pushActive} onClick={() => {
-                  if (client) void run('push-disable', async () => { await disablePush(client); setPushActive(false) }, '이 기기의 알림을 껐습니다.')
-                }}>알림 끄기</button>
+                <button type="button" className="button primary" disabled={occupied || pushChecking || !client || !user || !authenticated || !online || !pushSupported || !preparedPush.current?.registration?.active || !config.vapidPublicKey.trim() || permission === 'denied' || pushRegistered}
+                  onClick={() => changePush(true)}><Bell size={16} />{busy === 'push-enable' ? '알림 등록 중…' : localPush ? '서버에 다시 등록' : '이 기기에서 알림 켜기'}</button>
+                <button type="button" className="button secondary" disabled={occupied || pushChecking || !client || !user || !authenticated || !online || !pushSupported || !localPush}
+                  onClick={() => changePush(false)}>알림 끄기</button>
+                <button type="button" className="button secondary" disabled={occupied || pushChecking || !client || !user || !authenticated || !online || !pushSupported}
+                  onClick={() => { void refreshPush.current(true) }}><RefreshCw size={16} className={pushChecking ? 'spinning' : ''} />{pushChecking ? '등록 확인 중…' : '등록 다시 확인'}</button>
               </div>
               <p className="settings-help">iPhone·iPad에서는 홈 화면에 추가한 앱에서 알림을 켜 주세요. 차단된 알림 권한은 브라우저 설정에서 변경할 수 있습니다.</p>
             </section>

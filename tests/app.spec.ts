@@ -148,6 +148,33 @@ test('stores a PNG as WebP and downloads a lossless PNG with text and alpha pixe
   expect((await snapshot(page)).images).toHaveLength(1)
 })
 
+test('mobile Back closes the note, saves its last edit, and restores the filtered list', async ({ page }) => {
+  const title = '뒤로가기 확인용 메모'
+  await startNote(page, title, '기존 메모')
+  await finishNote(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  const search = page.getByRole('searchbox', { name: '메모 검색' })
+  await search.fill(title)
+  const card = page.getByRole('button', { name: `${title} 메모 열기`, exact: true })
+  const listUrl = page.url()
+  await card.click()
+  const editor = page.getByRole('dialog', { name: '메모 편집', exact: true })
+  await editor.getByRole('button', { name: '메모 공유', exact: true }).click()
+  const shareDialog = page.getByRole('dialog', { name: '다른 앱으로 보내기', exact: true })
+  await expect(shareDialog).toBeVisible()
+  await page.goBack({ waitUntil: 'commit' })
+  await expect(shareDialog).toHaveCount(0)
+  await editor.getByRole('textbox', { name: '메모 내용', exact: true }).fill('뒤로가기 직전의 마지막 수정')
+
+  await page.goBack({ waitUntil: 'commit' })
+  await expect(editor).toHaveCount(0)
+  expect(page.url()).toBe(listUrl)
+  await expect(search).toHaveValue(title)
+  await card.click()
+  await expect(editor.getByRole('textbox', { name: '메모 내용', exact: true })).toHaveValue('뒤로가기 직전의 마지막 수정')
+  await finishNote(page)
+})
+
 test('imports a ZIP backup as new notes while preserving subsequent edits to existing notes', async ({ page }) => {
   await startNote(page, '백업 당시 제목', '백업 당시 내용')
   await finishNote(page)

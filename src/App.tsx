@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { registerSW } from 'virtual:pwa-register'
-import type { SupabaseClient, User } from '@supabase/supabase-js'
+import type { Session, SupabaseClient, User } from '@supabase/supabase-js'
 import { Check, CheckCheck, Cloud, CloudOff, Download, FileText, FolderHeart, Hash, Image as ImageIcon, LayoutGrid, LoaderCircle, Menu, Pin, Plus, Search, Settings2, Sparkles, Trash2, WifiOff, X } from 'lucide-react'
 import { attachImages, createNote, db, formatBytes, getSetting, setSetting, updateNote } from './lib/db'
 import { createCloudClient, signOutCloud, subscribeToNoteChanges, validateCloudConfig } from './lib/cloud'
@@ -9,10 +9,13 @@ import { clearCachedOwner, readCachedOwner, writeCachedOwner, type LocalOwner } 
 import { adoptLocalNotes, syncNotes } from './lib/sync'
 import { optimizeImage } from './lib/media'
 import { deleteCapture, readCapture } from './lib/share-inbox'
+import { loginSessionId } from './lib/login-session'
+import { useNoteBackNavigation } from './lib/useNoteBackNavigation'
 import type { CloudConfig, Note, NoteFilter, StoredImage } from './types'
-import NoteEditor from './components/NoteEditor'
+import NoteEditor, { type NoteEditorHandle } from './components/NoteEditor'
 import SettingsDialog from './components/SettingsDialog'
 import ImageView from './components/ImageView'
+import LoginPushPrompt from './components/LoginPushPrompt'
 
 const emptyConfig: CloudConfig = { url: '', anonKey: '', vapidPublicKey: '' }
 const defaultConfig: CloudConfig = {
@@ -54,6 +57,7 @@ export default function App() {
   const [authReady, setAuthReady] = useState(false)
   const [user, setUser] = useState<LocalOwner | null>(null)
   const [authenticated, setAuthenticated] = useState(false)
+  const [pushLogin, setPushLogin] = useState<{ client: SupabaseClient; ownerId: string; id: string } | null>(null)
   const [online, setOnline] = useState(navigator.onLine)
   const [syncing, setSyncing] = useState(false)
   const [syncError, setSyncError] = useState('')
@@ -68,6 +72,7 @@ export default function App() {
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const activeSync = useRef<{ promise: Promise<void>; client: SupabaseClient; ownerId: string } | null>(null)
   const editingRef = useRef<symbol | null>(null)
+  const noteEditor = useRef<NoteEditorHandle>(null)
   const userRef = useRef<LocalOwner | null>(null)
   const verifiedUserRef = useRef<User | null>(null)
   const signingOutRef = useRef(false)
@@ -91,6 +96,8 @@ export default function App() {
     editingRef.current = null
     setEditorNote(null)
   }, [])
+  const requestEditorClose = useCallback(() => noteEditor.current?.requestClose(), [])
+  useNoteBackNavigation(editorId, requestEditorClose)
   const applyUser = useCallback((next: LocalOwner | null) => {
     if ((userRef.current?.id ?? null) !== (next?.id ?? null)) closeEditor()
     userRef.current = next
@@ -117,6 +124,7 @@ export default function App() {
     applyUser(null)
     verifiedUserRef.current = null
     setAuthenticated(false)
+    setPushLogin(null)
     authReadyRef.current = false
     setAuthReady(false)
     if (!configReady) return
@@ -129,7 +137,7 @@ export default function App() {
     let authVersion = 0
     let explicitlySignedOut = false
     let cachedOwner: LocalOwner | null = null
-    const presentSession = (actualUser: User | null, signedOut = false) => {
+    const presentSession = (session: Session | null, signedOut = false) => {
       if (!active) return
       authReadyRef.current = true; setAuthReady(true)
       if (signedOut) {
@@ -137,25 +145,34 @@ export default function App() {
         cachedOwner = null
         verifiedUserRef.current = null
         setAuthenticated(false)
+        setPushLogin(null)
         applyUser(null)
         void clearCachedOwner(config.url).catch(() => {})
         return
       }
       if (signingOutRef.current) return
+      const actualUser = session?.user ?? null
       verifiedUserRef.current = actualUser
       setAuthenticated(Boolean(actualUser && navigator.onLine))
       if (actualUser) {
+        const sessionId = loginSessionId(session?.access_token)
+        const nextId = sessionId ?? crypto.randomUUID()
+        setPushLogin(previous => previous?.client === client && previous.ownerId === actualUser.id && (!sessionId || previous.id === sessionId)
+          ? previous : { client, ownerId: actualUser.id, id: nextId })
         cachedOwner = { id: actualUser.id, ...(actualUser.email ? { email: actualUser.email } : {}) }
         applyUser(cachedOwner)
         void writeCachedOwner(config.url, cachedOwner).catch(() => {})
-      } else applyUser(!navigator.onLine ? cachedOwner : null)
+      } else {
+        setPushLogin(null)
+        applyUser(!navigator.onLine ? cachedOwner : null)
+      }
     }
     const checkSession = async () => {
       const version = authVersion
       try {
         const { data, error } = await client.auth.getSession()
         if (active && version === authVersion) {
-          presentSession(data.session?.user || null)
+          presentSession(data.session)
           if (error && navigator.onLine) notify('로그인을 확인하지 못했습니다. 다시 로그인해 주세요.')
         }
       } catch {
@@ -181,7 +198,7 @@ export default function App() {
     const { data } = client.auth.onAuthStateChange((event, session) => {
       if (!active) return
       authVersion++
-      presentSession(session?.user || null, event === 'SIGNED_OUT')
+      presentSession(session, event === 'SIGNED_OUT')
     })
     return () => {
       active = false
@@ -297,7 +314,7 @@ export default function App() {
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement
-      if (target.matches('input, textarea, [contenteditable]') || editorId || settingsOpen) return
+      if (target.matches('input, textarea, [contenteditable]') || target.closest('dialog[open]') || editorId || settingsOpen) return
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k' || event.key === '/') { event.preventDefault(); searchRef.current?.focus() }
       if (event.key.toLowerCase() === 'n' && !event.ctrlKey && !event.metaKey) { event.preventDefault(); void newNote() }
     }
@@ -436,8 +453,10 @@ export default function App() {
       </div>
       <button className="mobile-fab" aria-label="새 메모" onClick={() => void newNote()}><Plus size={26} /></button>
     </main>
-    {selectedNote && <NoteEditor key={selectedNote.id} note={selectedNote} onClose={closeEditor} notify={notify} />}
+    {selectedNote && <NoteEditor key={selectedNote.id} ref={noteEditor} note={selectedNote} onClose={closeEditor} notify={notify} />}
     {settingsOpen && <SettingsDialog config={config} client={client} user={user} authenticated={authenticated && online} onSignOut={logout} onSaveConfig={saveConfig} onClose={() => setSettingsOpen(false)} notify={notify} onSync={() => performSync(true)} onAdopt={adopt} syncing={syncing} />}
+    {!editorId && !settingsOpen && online && authenticated && client && pushLogin?.client === client && pushLogin.ownerId === user?.id &&
+      <LoginPushPrompt key={pushLogin.id} client={client} projectUrl={config.url} ownerId={pushLogin.ownerId} sessionId={pushLogin.id} publicKey={config.vapidPublicKey} workerReady={pwaReady} />}
     {toast && <div className="toast" role="status"><Check size={17} /><span>{toast}</span><button className="icon-button" aria-label="알림 닫기" onClick={() => setToast('')}><X size={15} /></button></div>}
     {updateReady && <div className="update-toast" role="status"><span>새 버전이 준비됐어요.</span><button disabled={Boolean(editorId)} onClick={() => void updateWorker.current?.(true)}>{editorId ? '메모를 마치면 업데이트' : '업데이트'}</button></div>}
     {!settingsOpen && installEvent && <button className="install-chip" onClick={() => void install()}><Download size={15} />앱으로 설치</button>}

@@ -39,3 +39,39 @@ describe('share target input validation', () => {
     expect(() => validateSharedForm(malformed)).toThrow('텍스트 형식')
   })
 })
+
+describe('share target completeness', () => {
+  it('deduplicates a URL supplied by both Android text and url fields', () => {
+    const form = new FormData()
+    form.set('text', 'https://example.com/')
+    form.set('url', 'https://example.com/')
+    expect(validateSharedForm(form).text).toBe('https://example.com/')
+  })
+  it('rejects empty captures and unrecognized file fields instead of dropping data', () => {
+    expect(() => validateSharedForm(new FormData())).toThrow('선택해 주세요')
+    const form = new FormData()
+    form.set('text', '일부 내용')
+    form.set('other-file', new File(['pdf'], 'file.pdf', { type: 'application/pdf' }))
+    expect(() => validateSharedForm(form)).toThrow('첨부 파일')
+  })
+  it('bounds the whole image transfer even when each individual image is valid', () => {
+    const file = new File([new Uint8Array(18 * 1024 * 1024)], 'image.png', { type: 'image/png' })
+    const form = new FormData()
+    form.append('images', file); form.append('images', file); form.append('images', file)
+    try { validateSharedForm(form); throw new Error('Expected rejection') }
+    catch (error) { expect((error as ShareValidationError).status).toBe(413) }
+  })
+})
+describe('platform share file metadata', () => {
+  it('accepts a supported extension when the OS supplies an empty or generic MIME type', () => {
+    const form = new FormData()
+    form.append('images', new File(['png'], 'screenshot.PNG'))
+    form.append('images', new File(['jpeg'], 'photo.jpeg', { type: 'application/octet-stream' }))
+    expect(validateSharedForm(form).files.map(file => file.type)).toEqual(['image/png', 'image/jpeg'])
+  })
+  it('does not override an explicitly unsupported MIME type with a filename extension', () => {
+    const form = new FormData()
+    form.append('images', new File(['html'], 'fake.png', { type: 'text/html' }))
+    expect(() => validateSharedForm(form)).toThrow('PNG, JPEG')
+  })
+})

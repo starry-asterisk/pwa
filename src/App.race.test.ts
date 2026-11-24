@@ -9,21 +9,22 @@ import App from './App'
 
 const mocks = vi.hoisted(() => {
   const owner = { id: 'f485e060-eef0-4f14-9742-57d0891a7cab', email: 'owner@example.test' }
+  type TestSession = { user: typeof owner; access_token?: string }
   const state = {
     owner,
-    authListener: null as null | ((event: string, session: { user: typeof owner } | null) => void),
+    authListener: null as null | ((event: string, session: TestSession | null) => void),
     serviceWorkerListener: null as null | ((event: MessageEvent) => void),
   }
   const client = {
     auth: {
-      getSession: vi.fn(async () => ({ data: { session: { user: owner } }, error: null })),
+      getSession: vi.fn(async (): Promise<{ data: { session: TestSession }; error: null }> => ({ data: { session: { user: owner } }, error: null })),
       onAuthStateChange: vi.fn((listener) => {
         state.authListener = listener
         return { data: { subscription: { unsubscribe: vi.fn() } } }
       }),
     },
   }
-  return { state, client, sync: vi.fn() }
+  return { state, client, sync: vi.fn(), push: { supported: false, prepare: vi.fn(), verify: vi.fn(), enable: vi.fn() } }
 })
 
 vi.mock('virtual:pwa-register', () => ({ registerSW: () => () => Promise.resolve() }))
@@ -35,6 +36,13 @@ vi.mock('./lib/cloud', () => ({
   savePushSubscription: vi.fn(), removePushSubscription: vi.fn(),
 }))
 vi.mock('./lib/sync', () => ({ syncNotes: mocks.sync, adoptLocalNotes: vi.fn() }))
+vi.mock('./lib/notifications', () => ({
+  supportsPush: () => mocks.push.supported,
+  preparePush: mocks.push.prepare,
+  verifyPushRegistration: mocks.push.verify,
+  enablePush: mocks.push.enable,
+  disablePush: vi.fn(),
+}))
 
 let root: Root
 let container: HTMLDivElement
@@ -73,6 +81,11 @@ beforeEach(async () => {
     removeEventListener: () => {},
   } })
   mocks.sync.mockReset().mockResolvedValue(report)
+  mocks.push.supported = false
+  mocks.push.prepare.mockReset().mockResolvedValue({ registration: null, subscription: null })
+  mocks.push.verify.mockReset().mockResolvedValue(false)
+  mocks.push.enable.mockReset().mockResolvedValue(undefined)
+  localStorage.clear()
   container = document.createElement('div')
   document.body.append(container)
   root = createRoot(container)
@@ -82,6 +95,60 @@ afterEach(async () => {
   await act(async () => { root.unmount() })
   container.remove()
   history.replaceState(null, '', location.pathname)
+  vi.unstubAllGlobals()
+})
+
+describe('login notification offer', () => {
+  const firstLogin = 'ce395a9a-2872-4325-a757-197f4b0af1ae'
+  const nextLogin = '35d53867-be9c-458c-af85-1c510839efa4'
+  const session = (id: string, exp: number) => ({
+    user: mocks.state.owner, access_token: `header.${btoa(JSON.stringify({ session_id: id, exp }))}.signature`,
+  })
+  const prompt = () => container.querySelector('.login-push-dialog')
+  const enableOffer = async () => {
+    mocks.push.supported = true
+    vi.stubGlobal('Notification', { permission: 'granted' })
+    Object.defineProperties(HTMLDialogElement.prototype, {
+      showModal: { configurable: true, value(this: HTMLDialogElement) { this.setAttribute('open', '') } },
+      close: { configurable: true, value(this: HTMLDialogElement) { this.removeAttribute('open') } },
+    })
+    await db.settings.put({ key: 'cloud-config', value: { url: 'https://test.supabase.co', anonKey: 'sb_publishable_test', vapidPublicKey: 'configured-key' } })
+    mocks.client.auth.getSession.mockResolvedValue({ data: { session: session(firstLogin, 100) }, error: null })
+  }
+
+  it('offers once across token refresh and reload, and reports successful server registration on a new login', async () => {
+    await enableOffer()
+    await mount()
+    await until(() => Boolean(prompt()))
+    await click('.login-push-dialog button')
+    await act(async () => { mocks.state.authListener?.('TOKEN_REFRESHED', session(firstLogin, 200)) })
+    expect(prompt()).toBeNull()
+
+    await act(async () => { root.unmount() })
+    root = createRoot(container)
+    await mount()
+    expect(prompt()).toBeNull()
+
+    await act(async () => { mocks.state.authListener?.('SIGNED_IN', session(nextLogin, 300)) })
+    await until(() => Boolean(prompt()))
+    const registration = deferred()
+    mocks.push.enable.mockReturnValueOnce(registration.promise)
+    await click('.login-push-dialog .button.primary')
+    expect(prompt()?.textContent).not.toContain('서버 등록 완료')
+    await act(async () => { registration.resolve() })
+    expect(prompt()?.textContent).toContain('서버 등록 완료')
+  })
+
+  it('skips the offer when the browser subscription matches the server registration', async () => {
+    await enableOffer()
+    const subscription = { endpoint: 'https://push.example.test/current-device' }
+    mocks.push.prepare.mockResolvedValue({ registration: null, subscription })
+    mocks.push.verify.mockResolvedValue(true)
+    await mount()
+    await until(() => mocks.push.verify.mock.calls.length > 0)
+    expect(mocks.push.verify).toHaveBeenCalledWith(mocks.client, subscription, mocks.state.owner.id)
+    expect(prompt()).toBeNull()
+  })
 })
 
 describe('editor and synchronization races', () => {

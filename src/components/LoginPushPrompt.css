@@ -1,0 +1,24 @@
+.login-push-dialog {
+  width: min(420px, calc(100% - 32px));
+  max-height: calc(100dvh - 32px);
+  padding: 26px;
+  overflow: auto;
+  border: 1px solid #e1e5ee;
+  border-radius: 16px;
+  background: #fff;
+  color: #353a4e;
+  box-shadow: 0 25px 80px #1e234c26;
+}
+
+.login-push-dialog::backdrop { background: #22263566; backdrop-filter: blur(5px); }
+.login-push-icon { display: grid; width: 44px; height: 44px; margin-bottom: 15px; place-items: center; border-radius: 12px; background: #f3edfa; color: #7955a1; }
+.login-push-dialog h2 { margin: 0; font-size: 22px; line-height: 1.4; letter-spacing: -.04em; }
+.login-push-dialog p { margin: 8px 0 14px; color: #596c85; font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; }
+.login-push-dialog .login-push-error { color: #914151; }
+.login-push-dialog .login-push-progress { color: #694f91; }
+.login-push-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 9px; margin-top: 18px; }
+.login-push-actions .button { min-height: 44px; white-space: normal; }
+
+@media (max-width: 400px) {
+  .login-push-dialog { padding: 20px; }
+}

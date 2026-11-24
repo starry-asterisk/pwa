@@ -58,10 +58,44 @@ export async function signOutCloud(client: SupabaseClient): Promise<void> {
   if (error) throw new Error(`로그아웃하지 못했습니다: ${error.message}`)
 }
 
-async function authenticatedOwner(client: SupabaseClient): Promise<string> {
+async function authenticatedOwner(client: SupabaseClient, expectedOwnerId?: string): Promise<string> {
   const { data, error } = await client.auth.getUser()
   if (error || !data.user) throw new Error('로그인한 뒤 다시 시도해 주세요.')
+  if (expectedOwnerId !== undefined && data.user.id !== expectedOwnerId) {
+    throw new Error('로그인 계정이 변경되었습니다. 현재 계정에서 다시 시도해 주세요.')
+  }
   return data.user.id
+}
+
+async function confirmOwner(client: SupabaseClient, ownerId: string): Promise<void> {
+  const { data, error } = await client.auth.getSession()
+  if (error || data.session?.user.id !== ownerId) {
+    throw new Error('로그인 계정이 변경되었습니다. 현재 계정에서 다시 시도해 주세요.')
+  }
+}
+
+function validPushEndpoint(endpoint: unknown): endpoint is string {
+  if (typeof endpoint !== 'string' || endpoint.length > 2048) return false
+  try {
+    const url = new URL(endpoint)
+    return url.protocol === 'https:' && !url.username && !url.password && endpoint === endpoint.trim()
+  } catch { return false }
+}
+
+/** Read only this owner's device endpoint; subscription encryption keys are not fetched. */
+export async function hasPushRegistration(
+  client: SupabaseClient,
+  deviceId: string,
+  endpoint: string,
+  expectedOwnerId?: string,
+): Promise<boolean> {
+  if (!uuidPattern.test(deviceId) || !validPushEndpoint(endpoint)) throw new Error('알림 구독 정보가 올바르지 않습니다.')
+  const ownerId = await authenticatedOwner(client, expectedOwnerId)
+  const { data, error } = await client.from('push_subscriptions')
+    .select('endpoint:subscription->>endpoint').eq('owner_id', ownerId).eq('device_id', deviceId).maybeSingle()
+  if (error) throw new Error('서버의 알림 등록을 확인하지 못했습니다. 연결을 확인한 뒤 다시 시도해 주세요.')
+  await confirmOwner(client, ownerId)
+  return data?.endpoint === endpoint
 }
 
 export async function savePushSubscription(
@@ -69,11 +103,12 @@ export async function savePushSubscription(
   subscription: PushSubscription | PushSubscriptionJSON,
   deviceId: string,
   label = '',
+  expectedOwnerId?: string,
 ): Promise<void> {
   if (!uuidPattern.test(deviceId)) throw new Error('기기 식별자가 올바르지 않습니다.')
-  const ownerId = await authenticatedOwner(client)
+  const ownerId = await authenticatedOwner(client, expectedOwnerId)
   const value = 'toJSON' in subscription ? subscription.toJSON() : subscription
-  if (!value.endpoint?.startsWith('https://') || !value.keys?.p256dh || !value.keys.auth) {
+  if (!validPushEndpoint(value.endpoint) || !value.keys?.p256dh || !value.keys.auth) {
     throw new Error('알림 구독 정보가 올바르지 않습니다.')
   }
   const { error } = await client.from('push_subscriptions').upsert({
@@ -83,13 +118,16 @@ export async function savePushSubscription(
     subscription: value,
     updated_at: new Date().toISOString(),
   }, { onConflict: 'owner_id,device_id' })
-  if (error) throw new Error(`알림 기기를 등록하지 못했습니다: ${error.message}`)
+  if (error) throw new Error('서버에 알림 기기를 등록하지 못했습니다. 로그인과 연결을 확인한 뒤 다시 시도해 주세요.')
+  await confirmOwner(client, ownerId)
 }
 
-export async function removePushSubscription(client: SupabaseClient, deviceId: string): Promise<void> {
-  const ownerId = await authenticatedOwner(client)
+export async function removePushSubscription(client: SupabaseClient, deviceId: string, expectedOwnerId?: string): Promise<void> {
+  if (!uuidPattern.test(deviceId)) throw new Error('기기 식별자가 올바르지 않습니다.')
+  const ownerId = await authenticatedOwner(client, expectedOwnerId)
   const { error } = await client.from('push_subscriptions').delete().eq('owner_id', ownerId).eq('device_id', deviceId)
-  if (error) throw new Error(`알림 기기를 해제하지 못했습니다: ${error.message}`)
+  if (error) throw new Error('서버의 알림 등록을 해제하지 못했습니다. 연결을 확인한 뒤 다시 시도해 주세요.')
+  await confirmOwner(client, ownerId)
 }
 
 /** Realtime is an invalidation signal; syncNotes retrieves authoritative data. */
