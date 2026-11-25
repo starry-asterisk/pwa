@@ -176,8 +176,9 @@ public sealed class CaptureResultWindow : Window
             var result = await bridge.OpenAsync(payload, cancellation.Token);
             if (closed)
                 return;
-            status.Text = ocrHint + result.Message;
             capturePath = result.FilePath;
+            status.Text = ocrHint + result.Message
+                + (capturePath is null ? "" : $"\n캡처 파일: {capturePath}");
             if (capturePath is not null)
             {
                 title.IsReadOnly = true;
@@ -190,7 +191,7 @@ public sealed class CaptureResultWindow : Window
         {
             AppPaths.Log(exception);
             if (!closed)
-                status.Text = capturePath is null
+                status.Text = exception is CaptureStorageException ? exception.Message : capturePath is null
                 ? "캡처 파일을 준비하지 못했습니다. 저장공간을 확인한 뒤 다시 시도해 주세요."
                 : "기존 캡처 파일을 열지 못했습니다. 캡처 파일 위치에서 모아의 연결 앱을 선택해 주세요.";
         }

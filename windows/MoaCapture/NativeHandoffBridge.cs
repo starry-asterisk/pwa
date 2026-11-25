@@ -68,8 +68,7 @@ public sealed class NativeHandoffBridge : IDisposable
         }, JsonOptions);
         if (manifest.Length > MaximumManifestBytes) throw new InvalidOperationException("캡처한 텍스트가 너무 큽니다.");
 
-        var directory = Path.GetFullPath(Path.Combine(AppPaths.DataDirectory, "handoff"));
-        Directory.CreateDirectory(directory);
+        var directory = AppPaths.GetHandoffDirectory();
         var filePath = Path.Combine(directory, $"{id}.moacapture");
         var writingPath = filePath + ".writing";
         try

@@ -9,7 +9,7 @@ import { clearCachedOwner, readCachedOwner, writeCachedOwner, type LocalOwner } 
 import { adoptLocalNotes, syncNotes } from './lib/sync'
 import { optimizeImage } from './lib/media'
 import { deleteCapture, readCapture, type SharedCapture } from './lib/share-inbox'
-import { listenForCaptureFiles, receiveCaptureFile } from './lib/capture-handoff'
+import { CaptureFileOpenError, listenForCaptureFiles, receiveCaptureFile } from './lib/capture-handoff'
 import { loginSessionId } from './lib/login-session'
 import { useNoteBackNavigation } from './lib/useNoteBackNavigation'
 import type { CloudConfig, Note, NoteFilter, StoredImage } from './types'
@@ -82,6 +82,8 @@ export default function App() {
   const processingCapture = useRef(false)
   const [captureRetry, setCaptureRetry] = useState(0)
   const [windowsCaptureIds, setWindowsCaptureIds] = useState<string[]>([])
+  const [windowsCaptureOpenError, setWindowsCaptureOpenError] = useState('')
+  const recoveryCaptureInput = useRef<HTMLInputElement>(null)
   const updateWorker = useRef<((reloadPage?: boolean) => Promise<void>) | null>(null)
   const notify = useCallback((message: string) => {
     clearTimeout(toastTimer.current)
@@ -91,9 +93,13 @@ export default function App() {
   const queueWindowsCapture = useCallback(({ id }: SharedCapture) => {
     setWindowsCaptureIds(ids => ids.includes(id) ? ids : [...ids, id])
   }, [])
-  const reportWindowsCaptureError = useCallback((error: Error) => notify(error.message), [notify])
+  const reportWindowsCaptureError = useCallback((error: Error) => {
+    if (error instanceof CaptureFileOpenError) setWindowsCaptureOpenError(error.message)
+    else notify(error.message)
+  }, [notify])
   const importWindowsCapture = useCallback((file: File) => {
     void receiveCaptureFile(file).then(capture => {
+      setWindowsCaptureOpenError('')
       setSettingsOpen(false)
       queueWindowsCapture(capture)
     }).catch((error: unknown) => reportWindowsCaptureError(error instanceof Error ? error : new Error('캡처 파일을 열지 못했습니다.')))
@@ -478,6 +484,17 @@ export default function App() {
         <section className="page-heading"><div><div className="eyebrow"><span />KEEP YOUR LITTLE THINGS</div><h1>{pageTitle}<span>{visibleNotes.length}</span></h1><p>{filter === 'trash' ? '잠시 내려놓은 기록. 언제든 다시 꺼낼 수 있어요.' : filter === 'images' ? '눈에 담았던 순간을, 한곳에 모아두세요.' : filter === 'pinned' ? '자주 꺼내 보고 싶은 생각들을 모았어요.' : '스치는 생각부터 소중한 순간까지, 가볍게 담아두세요.'}</p></div><button className="button primary heading-new" onClick={() => void newNote()}><Plus size={18} />새 메모</button></section>
         {!user && <div className="local-banner"><div className="banner-icon"><CheckCheck size={19} /></div><p><strong>지금은 이 기기에 안전하게 담고 있어요.</strong><span>인터넷 없이도 기록하고, 준비되면 내 기기들을 연결하세요.</span></p><button onClick={() => setSettingsOpen(true)}>기기 연결</button></div>}
         {user && localCount > 0 && <div className="local-banner"><div className="banner-icon"><Cloud size={19} /></div><p><strong>이 기기에만 있는 메모가 {localCount}개 있어요.</strong><span>계정에 연결하면 다른 기기에서도 볼 수 있습니다.</span></p><button onClick={() => void adopt().catch(error => notify(error.message))}>함께 동기화</button></div>}
+        {windowsCaptureOpenError && <div className="local-banner">
+          <div className="banner-icon"><FileText size={19} aria-hidden="true" /></div>
+          <p role="alert"><strong>{windowsCaptureOpenError}</strong><span>보조 앱의 ‘캡처 파일 위치’에서 .moacapture 파일을 확인한 뒤 직접 선택하세요.</span></p>
+          <button type="button" onClick={() => recoveryCaptureInput.current?.click()}>캡처 파일 선택</button>
+          <button type="button" aria-label="캡처 안내 닫기" onClick={() => setWindowsCaptureOpenError('')}><X size={16} aria-hidden="true" /></button>
+          <input ref={recoveryCaptureInput} type="file" accept=".moacapture" hidden aria-label="복구할 캡처 파일" onChange={event => {
+            const file = event.currentTarget.files?.[0]
+            event.currentTarget.value = ''
+            if (file) importWindowsCapture(file)
+          }} />
+        </div>}
         <div className="collection-toolbar"><label className="search-box"><Search size={18} /><input ref={searchRef} type="search" placeholder="제목, 내용, 태그로 찾아보세요" aria-label="메모 검색" value={search} onChange={event => setSearch(event.target.value)} /><kbd>/</kbd></label><div className="view-controls"><select aria-label="메모 정렬" value={sort} onChange={event => setSort(event.target.value as typeof sort)}><option value="updated">최근 수정순</option><option value="created">최근 작성순</option><option value="title">제목순</option></select><span /><button className={`icon-button ${gridView ? 'selected' : ''}`} aria-label="격자로 보기" aria-pressed={gridView} onClick={() => setGridView(true)}><LayoutGrid size={18} /></button><button className={`icon-button ${!gridView ? 'selected' : ''}`} aria-label="목록으로 보기" aria-pressed={!gridView} onClick={() => setGridView(false)}><FileText size={18} /></button></div></div>
         {tag && <div className="active-filter"><span>#{tag}<button aria-label="태그 필터 해제" onClick={() => setTag(null)}><X size={13} /></button></span></div>}
         {visibleNotes.length ? <div className={`notes-grid ${gridView ? '' : 'list-view'}`}>{visibleNotes.map(note => <article className={`note-card ${note.attachments.length ? 'has-image' : ''} ${note.pinned ? 'is-pinned' : ''}`} key={note.id} tabIndex={0} role="button" aria-label={`${noteTitle(note)} 메모 열기`} onClick={() => void openNote(note.id)} onKeyDown={event => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); void openNote(note.id) } }}>

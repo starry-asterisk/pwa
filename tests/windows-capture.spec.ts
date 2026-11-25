@@ -95,3 +95,25 @@ test('imports a saved capture file from Settings and exposes the GitHub installe
   await expect(editor.getByRole('textbox', { name: '메모 내용' })).toHaveValue(capture.text)
   await expect(editor.getByRole('img', { name: 'capture.png', exact: true })).toBeVisible()
 })
+
+test('recovers a capture when the browser blocks reading its OS file handle', async ({ page }) => {
+  const capture = await makeCapture(page)
+  await page.waitForFunction(() => typeof Reflect.get(window, '__moaFileLaunchConsumer') === 'function')
+  await page.evaluate(() => {
+    Reflect.get(window, '__moaFileLaunchConsumer')({ files: [{
+      kind: 'file',
+      getFile: async () => { throw new DOMException('An attempt was made to break through the security policy of the user agent.', 'SecurityError') },
+    }] })
+  })
+  const recovery = page.getByRole('alert')
+  await expect(recovery).toContainText('브라우저가 전달된 캡처 파일의 읽기를 허용하지 않았어요.')
+  const fileChooser = page.waitForEvent('filechooser')
+  await page.getByRole('button', { name: '캡처 파일 선택', exact: true }).click()
+  await (await fileChooser).setFiles({
+    name: 'retained.moacapture', mimeType: 'application/octet-stream', buffer: capture.file,
+  })
+  await expect(recovery).toHaveCount(0)
+  const editor = page.getByRole('dialog', { name: '메모 편집', exact: true })
+  await expect(editor.getByRole('textbox', { name: '메모 내용' })).toHaveValue(capture.text)
+  await expect(editor.getByRole('img', { name: 'capture.png', exact: true })).toBeVisible()
+})

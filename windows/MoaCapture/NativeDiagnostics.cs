@@ -22,6 +22,7 @@ public static class NativeDiagnostics
         try
         {
             CheckSyntheticCoordinates();
+            CheckHandoffDirectories();
             var panel = new StackPanel { Margin = new Thickness(36), Background = Brushes.White };
             panel.Children.Add(new TextBlock { Text = "MOA CAPTURE TEST 12345", FontSize = 34, FontWeight = FontWeights.Bold, Foreground = Brushes.Black });
             panel.Children.Add(new TextBlock { Text = "모아 화면 캡처 테스트", FontSize = 25, FontFamily = new FontFamily("Malgun Gothic"), Foreground = Brushes.Black, Margin = new Thickness(0, 24, 0, 0) });
@@ -92,13 +93,17 @@ public static class NativeDiagnostics
                     localOcr = true,
                     fileHandoff = true,
                     automaticResultHandoff = true,
-                    idempotentRetry = true
+                    idempotentRetry = true,
+                    downloadsAndDocumentsFallback = true,
+                    protectedPathRejected = true,
+                    explicitHandoffDirectory = true
                 },
                 monitorCount = snapshots.Count,
                 width = capture.Width,
                 height = capture.Height,
                 ocrText = recognized.Text,
-                captureFile = result.FilePath
+                captureFile = result.FilePath,
+                defaultDownloadsFolder = CaptureFileStorage.GetKnownFolder(CaptureFileStorage.Downloads)
             }, new JsonSerializerOptions { WriteIndented = true }));
             return 0;
         }
@@ -117,6 +122,57 @@ public static class NativeDiagnostics
             session?.Cancel();
             fixture?.Close();
         }
+    }
+
+    private static void CheckHandoffDirectories()
+    {
+        string testRoot = Path.Combine(AppPaths.DataDirectory, "handoff-path-checks");
+        string downloads = Path.Combine(testRoot, "Downloads");
+        string documents = Path.Combine(testRoot, "Documents");
+        string protectedPath = Path.Combine(testRoot, "LocalAppData");
+        string expectedDownloads = Path.Combine(downloads, "Moa Captures");
+        string expectedDocuments = Path.Combine(documents, "Moa Captures");
+        var checkedPaths = new List<string>();
+
+        string KnownFolder(Guid id) => id == CaptureFileStorage.Downloads ? downloads : documents;
+        string selected = CaptureFileStorage.ResolveWritableDirectory(KnownFolder, checkedPaths.Add, protectedPath);
+        Require(selected == expectedDownloads && checkedPaths.Count == 1, "Downloads was not the first handoff location.");
+
+        checkedPaths.Clear();
+        selected = CaptureFileStorage.ResolveWritableDirectory(KnownFolder, path =>
+        {
+            checkedPaths.Add(path);
+            if (path == expectedDownloads)
+                throw new UnauthorizedAccessException("Simulated unavailable Downloads folder.");
+        }, protectedPath);
+        Require(selected == expectedDocuments && checkedPaths.Count == 2, "Documents did not replace unwritable Downloads.");
+
+        selected = CaptureFileStorage.ResolveWritableDirectory(id => id == CaptureFileStorage.Downloads
+            ? throw new IOException("Simulated missing Downloads known folder.") : documents, _ => { }, protectedPath);
+        Require(selected == expectedDocuments, "Missing Downloads did not use Documents.");
+
+        checkedPaths.Clear();
+        selected = CaptureFileStorage.ResolveWritableDirectory(id => id == CaptureFileStorage.Downloads
+            ? Path.Combine(protectedPath, "redirected-downloads") : documents, checkedPaths.Add, protectedPath);
+        Require(selected == expectedDocuments && checkedPaths.Count == 1
+            && checkedPaths[0] == expectedDocuments, "A protected LocalAppData redirect was used for handoff.");
+
+        bool rejected = false;
+        try
+        {
+            CaptureFileStorage.ResolveWritableDirectory(KnownFolder,
+                _ => throw new UnauthorizedAccessException("Simulated unwritable user folders."), protectedPath);
+        }
+        catch (CaptureStorageException) { rejected = true; }
+        Require(rejected, "Unavailable user folders did not produce a visible storage error.");
+
+        string expectedOverride = Path.Combine(AppPaths.DataDirectory, "handoff");
+        Require(AppPaths.GetHandoffDirectory() == expectedOverride, "Explicit --data-dir no longer controls diagnostic handoff files.");
+        string preservedFile = Path.Combine(expectedOverride, $"existing-{Guid.NewGuid():N}.keep");
+        File.WriteAllText(preservedFile, "Keep existing capture data.");
+        Require(AppPaths.GetHandoffDirectory() == expectedOverride
+            && File.ReadAllText(preservedFile) == "Keep existing capture data.", "Existing handoff files were altered.");
+        Require(Directory.GetFiles(expectedOverride, ".moa-write-test-*.tmp").Length == 0, "A write probe was not cleaned up.");
     }
 
     private static void CheckSyntheticCoordinates()

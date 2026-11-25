@@ -123,6 +123,28 @@ export interface CaptureFileListener {
   onCapture: (capture: SharedCapture) => void
   onError: (error: Error) => void
 }
+
+export class CaptureFileOpenError extends Error {
+  constructor(cause: unknown) {
+    const name = cause instanceof Error || cause instanceof DOMException ? cause.name : ''
+    const message = name === 'NotAllowedError' || name === 'SecurityError'
+      ? '브라우저가 전달된 캡처 파일의 읽기를 허용하지 않았어요.'
+      : name === 'NotFoundError'
+        ? '전달된 캡처 파일을 찾을 수 없어요.'
+        : '브라우저가 전달된 캡처 파일을 읽지 못했어요.'
+    super(message, { cause })
+    this.name = 'CaptureFileOpenError'
+  }
+}
+
+async function openLaunchedCapture(handle: { getFile: () => Promise<File> }): Promise<File> {
+  try {
+    return await handle.getFile()
+  } catch (error) {
+    throw new CaptureFileOpenError(error)
+  }
+}
+
 type LaunchEvent = { capture: SharedCapture } | { error: Error }
 const dispatchers = new WeakMap<CaptureLaunchQueue, { listeners: Set<CaptureFileListener>; pending: LaunchEvent[] }>()
 
@@ -151,7 +173,7 @@ export function listenForCaptureFiles(listener: CaptureFileListener, suppliedQue
         for (const handle of handles) {
           try {
             if (!handle || typeof handle.getFile !== 'function') fail('열 수 없는 캡처 파일입니다.')
-            emit({ capture: await receiveCaptureFile(await handle.getFile()) })
+            emit({ capture: await receiveCaptureFile(await openLaunchedCapture(handle)) })
           } catch (error) {
             emit({ error: error instanceof Error ? error : new Error('모아 캡처 파일을 열지 못했습니다.') })
           }

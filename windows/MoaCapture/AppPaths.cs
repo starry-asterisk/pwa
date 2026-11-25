@@ -6,13 +6,17 @@ namespace MoaCapture;
 public static class AppPaths
 {
     public static string DataDirectory { get; private set; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MoaCaptureData");
+    private static string? explicitDataDirectory;
+
+    public static string GetHandoffDirectory() => CaptureFileStorage.GetDirectory(explicitDataDirectory);
+
     public static void Initialize(string[] args)
     {
         if (Array.IndexOf(args, "--self-test") >= 0 && Array.IndexOf(args, "--data-dir") < 0)
             throw new ArgumentException("Native self-test requires an explicit --data-dir.");
         for (int index = 0; index < args.Length - 1; index++)
             if (args[index] == "--data-dir")
-                DataDirectory = Path.GetFullPath(args[index + 1]);
+                DataDirectory = explicitDataDirectory = Path.GetFullPath(args[index + 1]);
         Directory.CreateDirectory(DataDirectory);
     }
     public static void Log(Exception exception)
