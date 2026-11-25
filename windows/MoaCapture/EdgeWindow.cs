@@ -1,5 +1,4 @@
 using System;
-using System.Diagnostics;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
@@ -63,7 +62,7 @@ public sealed class EdgeWindow : Window
         foreach (var mode in CaptureOptions.Modes)
             AddItem(menu, mode.Label, () => capture(mode.Mode));
         menu.Items.Add(new Separator());
-        AddItem(menu, "모아 열기", () => Process.Start(new ProcessStartInfo("https://starry-asterisk.github.io/pwa/") { UseShellExecute = true }));
+        AddItem(menu, "모아 열기", MoaPwaLauncher.Open);
         menu.Items.Add(new Separator());
         AddItem(menu, "버튼 위치 초기화", () => { settings.EdgeX = null; settings.EdgeY = null; PlaceInitial(); settings.Save(); });
         AddItem(menu, "업데이트 확인", checkUpdates);
