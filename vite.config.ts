@@ -21,6 +21,7 @@ export default defineConfig({
       ],
       share_target: { action: `${base}share`, method: 'POST', enctype: 'multipart/form-data',
         params: { title: 'title', text: 'text', url: 'url', files: [{ name: 'images', accept: ['image/png', 'image/jpeg', 'image/webp', '.png', '.jpg', '.jpeg', '.webp'] }] } },
+      file_handlers: [{ action: base, accept: { 'application/vnd.moa.capture+zip': ['.moacapture'] } }],
     },
   })],
   optimizeDeps: { exclude: ['@jsquash/webp'] },

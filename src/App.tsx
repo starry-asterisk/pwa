@@ -8,7 +8,8 @@ import { createCloudClient, signOutCloud, subscribeToNoteChanges, validateCloudC
 import { clearCachedOwner, readCachedOwner, writeCachedOwner, type LocalOwner } from './lib/offline-owner'
 import { adoptLocalNotes, syncNotes } from './lib/sync'
 import { optimizeImage } from './lib/media'
-import { deleteCapture, readCapture } from './lib/share-inbox'
+import { deleteCapture, readCapture, type SharedCapture } from './lib/share-inbox'
+import { listenForCaptureFiles, receiveCaptureFile } from './lib/capture-handoff'
 import { loginSessionId } from './lib/login-session'
 import { useNoteBackNavigation } from './lib/useNoteBackNavigation'
 import type { CloudConfig, Note, NoteFilter, StoredImage } from './types'
@@ -80,12 +81,24 @@ export default function App() {
   const authReadyRef = useRef(false)
   const processingCapture = useRef(false)
   const [captureRetry, setCaptureRetry] = useState(0)
+  const [windowsCaptureIds, setWindowsCaptureIds] = useState<string[]>([])
   const updateWorker = useRef<((reloadPage?: boolean) => Promise<void>) | null>(null)
   const notify = useCallback((message: string) => {
     clearTimeout(toastTimer.current)
     setToast(message)
     toastTimer.current = setTimeout(() => setToast(''), 5000)
   }, [])
+  const queueWindowsCapture = useCallback(({ id }: SharedCapture) => {
+    setWindowsCaptureIds(ids => ids.includes(id) ? ids : [...ids, id])
+  }, [])
+  const reportWindowsCaptureError = useCallback((error: Error) => notify(error.message), [notify])
+  const importWindowsCapture = useCallback((file: File) => {
+    void receiveCaptureFile(file).then(capture => {
+      setSettingsOpen(false)
+      queueWindowsCapture(capture)
+    }).catch((error: unknown) => reportWindowsCaptureError(error instanceof Error ? error : new Error('캡처 파일을 열지 못했습니다.')))
+  }, [queueWindowsCapture, reportWindowsCaptureError])
+  useEffect(() => listenForCaptureFiles({ onCapture: queueWindowsCapture, onError: reportWindowsCaptureError }), [queueWindowsCapture, reportWindowsCaptureError])
   const client = useMemo(() => {
     if (!config.url || !config.anonKey) return null
     try { return createCloudClient(config) } catch { return null }
@@ -340,33 +353,55 @@ export default function App() {
   }, [openPushedNote])
   useEffect(() => {
     const params = new URLSearchParams(location.search)
-    const captureId = params.get('capture')
-    if (!captureId || !configReady || !authReady || processingCapture.current || editingRef.current) return
+    const windowsCaptureId = windowsCaptureIds[0]
+    const captureId = windowsCaptureId ?? params.get('capture')
+    if (!captureId || !configReady || !authReady || processingCapture.current || editingRef.current || (windowsCaptureId && settingsOpen)) return
     processingCapture.current = true
     const initialOwner = userRef.current?.id ?? null
     void runEditorOperation(async ({ ownerId, isCurrent }) => {
+      const existing = async () => {
+        const prior = await db.notes.get(captureId)
+        if (prior && prior.cloudOwnerId !== null && prior.cloudOwnerId !== ownerId) {
+          throw new Error('이 캡처는 이미 다른 계정의 메모에 저장돼 있습니다.')
+        }
+        return prior
+      }
+      let note = windowsCaptureId ? await existing() : undefined
+      if (!note) {
         const capture = await readCapture(captureId)
         if (!capture) throw new Error('공유한 내용을 찾을 수 없습니다.')
         const processedImages: StoredImage[] = []
         for (const file of capture.files) processedImages.push(await optimizeImage(file))
         if (!isCurrent()) return null
-        const note = await db.transaction('rw', db.notes, db.images, db.settings, async () => {
+        note = await db.transaction('rw', db.notes, db.images, db.settings, async () => {
           if (!isCurrent()) throw new Error('계정이 바뀌었습니다. 공유한 내용을 다시 열어 주세요.')
-          const created = await createNote(ownerId, { title: capture.title.slice(0, 200), body: capture.text })
+          const previous = windowsCaptureId ? await existing() : undefined
+          if (previous) return previous
+          const created = await createNote(ownerId, { title: capture.title.slice(0, 200), body: capture.text }, windowsCaptureId)
           if (processedImages.length) await attachImages(created.id, processedImages)
           if (!isCurrent()) throw new Error('계정이 바뀌었습니다. 공유한 내용을 다시 열어 주세요.')
           return created
         })
-        if (!isCurrent()) return null
-        await deleteCapture(captureId)
-        params.delete('capture'); history.replaceState(null, '', `${location.pathname}${params.size ? `?${params}` : ''}`)
-        notify('공유한 내용을 메모에 담았어요.')
-        return note
+      }
+      if (!isCurrent()) return null
+      await deleteCapture(captureId).catch(() => {})
+      if (!windowsCaptureId) {
+        const url = new URL(location.href)
+        if (url.searchParams.get('capture') === captureId) {
+          url.searchParams.delete('capture')
+          history.replaceState(history.state, '', url.href)
+        }
+      }
+      if (!windowsCaptureId) notify('공유한 내용을 메모에 담았어요.')
+      else if (note.body.trim()) notify('캡처 이미지와 텍스트를 메모에 저장했어요.')
+      else notify('캡처 이미지를 메모에 저장했어요. 읽어낸 텍스트는 없어요.')
+      return note
     }).finally(() => {
       processingCapture.current = false
-      if ((userRef.current?.id ?? null) !== initialOwner) setCaptureRetry(value => value + 1)
+      if (windowsCaptureId) setWindowsCaptureIds(ids => ids.filter(id => id !== windowsCaptureId))
+      else if ((userRef.current?.id ?? null) !== initialOwner) setCaptureRetry(value => value + 1)
     })
-  }, [configReady, authReady, user?.id, editorId, captureRetry, runEditorOperation, notify])
+  }, [configReady, authReady, user?.id, editorId, settingsOpen, windowsCaptureIds, captureRetry, runEditorOperation, notify])
   useEffect(() => {
     const params = new URLSearchParams(location.search)
     const noteId = params.get('note')
@@ -454,8 +489,8 @@ export default function App() {
       <button className="mobile-fab" aria-label="새 메모" onClick={() => void newNote()}><Plus size={26} /></button>
     </main>
     {selectedNote && <NoteEditor key={selectedNote.id} ref={noteEditor} note={selectedNote} onClose={closeEditor} notify={notify} />}
-    {settingsOpen && <SettingsDialog config={config} client={client} user={user} authenticated={authenticated && online} onSignOut={logout} onSaveConfig={saveConfig} onClose={() => setSettingsOpen(false)} notify={notify} onSync={() => performSync(true)} onAdopt={adopt} syncing={syncing} />}
-    {!editorId && !settingsOpen && online && authenticated && client && pushLogin?.client === client && pushLogin.ownerId === user?.id &&
+    {settingsOpen && <SettingsDialog config={config} client={client} user={user} authenticated={authenticated && online} onSignOut={logout} onSaveConfig={saveConfig} onClose={() => setSettingsOpen(false)} notify={notify} onSync={() => performSync(true)} onAdopt={adopt} onWindowsCapture={importWindowsCapture} syncing={syncing} />}
+    {!editorId && !settingsOpen && !windowsCaptureIds.length && online && authenticated && client && pushLogin?.client === client && pushLogin.ownerId === user?.id &&
       <LoginPushPrompt key={pushLogin.id} client={client} projectUrl={config.url} ownerId={pushLogin.ownerId} sessionId={pushLogin.id} publicKey={config.vapidPublicKey} workerReady={pwaReady} />}
     {toast && <div className="toast" role="status"><Check size={17} /><span>{toast}</span><button className="icon-button" aria-label="알림 닫기" onClick={() => setToast('')}><X size={15} /></button></div>}
     {updateReady && <div className="update-toast" role="status"><span>새 버전이 준비됐어요.</span><button disabled={Boolean(editorId)} onClick={() => void updateWorker.current?.(true)}>{editorId ? '메모를 마치면 업데이트' : '업데이트'}</button></div>}

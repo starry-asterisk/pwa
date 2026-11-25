@@ -20,6 +20,7 @@ interface Props {
   notify: (message: string) => void
   onSync: () => Promise<void>
   onAdopt: () => Promise<void>
+  onWindowsCapture?: (file: File) => void
   syncing: boolean
 }
 
@@ -36,10 +37,11 @@ const pushStageLabels: Record<PushEnrollmentStage, string> = {
   server: '서버에 기기 등록 중…', verify: '서버 등록 확인 중…',
 }
 
-export default function SettingsDialog({ config, client, user, authenticated, onSignOut, onSaveConfig, onClose, notify, onSync, onAdopt, syncing }: Props) {
+export default function SettingsDialog({ config, client, user, authenticated, onSignOut, onSaveConfig, onClose, notify, onSync, onAdopt, onWindowsCapture, syncing }: Props) {
   const dialogId = useId()
   const dialog = useRef<HTMLElement>(null)
   const fileInput = useRef<HTMLInputElement>(null)
+  const captureInput = useRef<HTMLInputElement>(null)
   const close = useRef(onClose)
   close.current = onClose
   const [tab, setTab] = useState<Tab>('general')
@@ -317,6 +319,20 @@ export default function SettingsDialog({ config, client, user, authenticated, on
               <h3>앱으로 설치하기</h3>
               <p className="settings-help">휴대폰에서는 브라우저 메뉴의 ‘홈 화면에 추가’를, PC에서는 주소창의 설치 버튼을 이용하세요. 설치 후에는 인터넷 연결이 없어도 메모할 수 있습니다.</p>
             </section>
+            {onWindowsCapture && /Windows/i.test(navigator.userAgent) && <section className="settings-section">
+              <h3>Windows 화면 캡처</h3>
+              <p className="settings-help">Chrome 또는 Edge에서 모아를 앱으로 설치한 뒤 보조 앱을 실행하세요. 화면의 반투명 버튼으로 영역을 고르면 캡처가 모아에서 열립니다. 처음에 연결 앱이나 파일 열기 권한을 묻는 경우 모아를 선택하고 허용하세요.</p>
+              <div className="settings-actions">
+                <a className="button primary" href="https://github.com/starry-asterisk/pwa/releases/latest/download/Moa-Setup.exe"><Download size={16} aria-hidden="true" />Windows 보조 앱 설치 파일</a>
+                <button type="button" className="button secondary" onClick={() => captureInput.current?.click()}><Upload size={16} aria-hidden="true" />캡처 파일 열기</button>
+                <input ref={captureInput} type="file" accept=".moacapture" hidden aria-label="모아 캡처 파일" onChange={event => {
+                  const file = event.currentTarget.files?.[0]
+                  event.currentTarget.value = ''
+                  if (file) onWindowsCapture(file)
+                }} />
+              </div>
+              <p className="settings-help">Windows x64용입니다. 보조 앱을 실행하면 새 버전을 자동으로 확인합니다.</p>
+            </section>}
           </>}
 
           {tab === 'sync' && <>

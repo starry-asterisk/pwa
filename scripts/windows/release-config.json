@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "packageId": "StarryAsterisk.MoaCapture",
+  "project": "windows/MoaCapture/MoaCapture.csproj",
+  "mainExe": "MoaCapture.exe",
+  "title": "Moa Capture",
+  "channel": "win",
+  "runtime": "win-x64",
+  "minimumWindowsVersion": "10.0.19041.0",
+  "velopackVersion": "1.2.161",
+  "installerFileName": "Moa-Setup.exe",
+  "repository": "starry-asterisk/pwa",
+  "tessdata": {
+    "commit": "87416418657359cb625c412a48b6e1d6d41c29bd",
+    "files": [
+      { "name": "eng.traineddata", "sha256": "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2" },
+      { "name": "kor.traineddata", "sha256": "6b85e11d9bbf07863b97b3523b1b112844c43e713df8b66418a081fd1060b3b2" },
+      { "name": "LICENSE", "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30" }
+    ]
+  }
+}

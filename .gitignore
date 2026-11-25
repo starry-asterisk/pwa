@@ -9,3 +9,6 @@ playwright-report/
 test-results/
 *.local
 *.tsbuildinfo
+windows/**/bin/
+windows/**/obj/
+windows/MoaCapture/Assets/tessdata/*.traineddata

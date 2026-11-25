@@ -1,0 +1,83 @@
+name: Build and release Moa for Windows
+on:
+  push:
+    tags: ['windows-v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable Windows version, for example 0.1.0
+        required: true
+        default: '0.1.0'
+        type: string
+      publish:
+        description: Publish the verified installer to a stable GitHub Release
+        default: false
+        type: boolean
+permissions:
+  contents: read
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Resolve stable release version
+        id: version
+        shell: pwsh
+        env:
+          RELEASE_INPUT: ${{ inputs.version }}
+          RELEASE_REF: ${{ github.ref_name }}
+          TRIGGER_NAME: ${{ github.event_name }}
+        run: |
+          . ./scripts/windows/Common.ps1
+          $releaseVersion = if ($env:TRIGGER_NAME -eq 'push') { $env:RELEASE_REF -replace '^windows-v', '' } else { $env:RELEASE_INPUT }
+          Assert-ReleaseVersion $releaseVersion
+          "version=$releaseVersion" >> $env:GITHUB_OUTPUT
+      - name: Build and verify installer and auto-update packages
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          WINDOWS_SIGNING_METADATA_JSON: ${{ vars.WINDOWS_SIGNING_METADATA_JSON }}
+          AZURE_TENANT_ID: ${{ secrets.WINDOWS_SIGNING_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.WINDOWS_SIGNING_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.WINDOWS_SIGNING_CLIENT_SECRET }}
+        run: ./scripts/windows/Build-Release.ps1 -Version $env:RELEASE_VERSION -Repository $env:RELEASE_REPOSITORY
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: moa-windows-${{ steps.version.outputs.version }}
+          path: .cache/windows/releases/${{ steps.version.outputs.version }}/
+          if-no-files-found: error
+          retention-days: 14
+  publish:
+    needs: build
+    if: github.event_name == 'push' || inputs.publish
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: moa-windows-stable-publish
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: '10.0.x'
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: moa-windows-${{ needs.build.outputs.version }}
+          path: .cache/windows/publish-release/
+      - name: Publish complete stable release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_COMMIT: ${{ github.sha }}
+        run: ./scripts/windows/Publish-Release.ps1 -ReleaseDirectory .cache/windows/publish-release -Repository $env:RELEASE_REPOSITORY -TargetCommit $env:RELEASE_COMMIT

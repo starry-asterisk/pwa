@@ -28,10 +28,10 @@ export async function getDeviceId(): Promise<string> {
     return id
   })
 }
-export async function createNote(ownerId: string | null = null, initial: Partial<NoteContent> = {}): Promise<Note> {
+export async function createNote(ownerId: string | null = null, initial: Partial<NoteContent> = {}, noteId: string = crypto.randomUUID()): Promise<Note> {
   const now = new Date().toISOString()
   const note: Note = {
-    id: crypto.randomUUID(), title: '', body: '', tags: [], pinned: false,
+    id: noteId, title: '', body: '', tags: [], pinned: false,
     createdAt: now, updatedAt: now, deletedAt: null, attachments: [], ...initial,
     version: crypto.randomUUID(), baseVersion: null, dirty: true,
     originDeviceId: await getDeviceId(), cloudOwnerId: ownerId,
