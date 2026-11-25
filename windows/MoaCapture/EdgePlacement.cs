@@ -6,9 +6,8 @@ public enum DockEdge { Left, Right, Top, Bottom }
 
 internal readonly record struct EdgePlacement(CaptureMonitor Monitor, DockEdge Edge, int Along)
 {
-    private const int ButtonSize = 48;
-    private const int HandleLength = 44;
-    private const int HandleThickness = 8;
+    public const int ButtonSize = 48;
+    public const int HandleThickness = 8;
     private const int LegacyWidth = 52;
     private const int LegacyHeight = 76;
 
@@ -47,12 +46,11 @@ internal readonly record struct EdgePlacement(CaptureMonitor Monitor, DockEdge E
         _ => new(Along, Monitor.WorkArea.Bottom - 1)
     };
 
-    public PhysicalRect Bounds(bool expanded)
+    public PhysicalRect Bounds()
     {
         var work = Monitor.WorkArea;
-        bool vertical = IsVertical(Edge);
-        int width = Math.Min(work.Width, Pixels(expanded ? ButtonSize : vertical ? HandleThickness : HandleLength, Monitor.ScaleX));
-        int height = Math.Min(work.Height, Pixels(expanded ? ButtonSize : vertical ? HandleLength : HandleThickness, Monitor.ScaleY));
+        int width = Math.Min(work.Width, Pixels(ButtonSize, Monitor.ScaleX));
+        int height = Math.Min(work.Height, Pixels(ButtonSize, Monitor.ScaleY));
         int x = Edge switch
         {
             DockEdge.Left => work.Left,

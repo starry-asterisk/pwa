@@ -6,18 +6,20 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Threading;
 
 namespace MoaCapture;
 
 public sealed class EdgeWindow : Window
 {
+    private const double IdleOpacity = .58;
     private readonly CaptureSettings settings;
     private readonly Button button;
-    private readonly Image icon;
+    private readonly Grid viewport = new() { ClipToBounds = true };
+    private readonly TranslateTransform slide = new();
     private readonly ContextMenu menu = new();
     private EdgePlacement placement;
-    private PhysicalRect currentBounds;
     private NativeMethods.POINT pressPoint;
     private bool pressing, dragging, expanded;
 
@@ -33,18 +35,18 @@ public sealed class EdgeWindow : Window
         Topmost = true;
         ShowInTaskbar = false;
         ShowActivated = false;
-        Width = Height = 48;
+        Width = Height = EdgePlacement.ButtonSize;
         UseLayoutRounding = true;
-        icon = new Image { Source = Brand.Image, Width = 38, Height = 38 };
-        button = Theme.Button("", true);
-        button.Content = icon;
+        button = Theme.Button("", primary: true);
+        button.Opacity = IdleOpacity;
+        button.Content = new Image { Source = Brand.Image, Width = 38, Height = 38 };
         button.Margin = button.Padding = new Thickness(0);
         button.BorderThickness = new Thickness(0);
         button.MinHeight = 0;
-        Content = button;
+        button.RenderTransform = slide;
+        viewport.Children.Add(button);
+        Content = viewport;
         AutomationProperties.SetName(button, "모아 캡처 메뉴");
-        button.ToolTip = "클릭해서 캡처 메뉴 열기 · 드래그해서 화면 가장자리로 이동";
-        UpdateAppearance();
 
         foreach (var mode in CaptureOptions.Modes)
             AddItem(mode.Label, () => capture(mode.Mode));
@@ -55,8 +57,9 @@ public sealed class EdgeWindow : Window
         AddItem("업데이트 확인", checkUpdates);
         menu.Items.Add(new Separator());
         AddItem("종료", exit);
-        menu.PlacementTarget = button;
+        menu.PlacementTarget = viewport;
         button.ContextMenu = menu;
+        ContextMenuService.SetPlacementTarget(button, viewport);
         button.ContextMenuOpening += (_, _) => SetExpanded(true);
         menu.Closed += (_, _) => RefreshHover();
         button.Click += (_, _) =>
@@ -65,8 +68,8 @@ public sealed class EdgeWindow : Window
             menu.IsOpen = true;
         };
 
-        MouseEnter += (_, _) => SetExpanded(true);
-        MouseLeave += (_, _) => RefreshHover();
+        button.MouseEnter += (_, _) => SetExpanded(true);
+        button.MouseLeave += (_, _) => RefreshHover();
         button.PreviewMouseLeftButtonDown += (_, _) =>
         {
             pressing = NativeMethods.GetCursorPos(out pressPoint);
@@ -101,7 +104,7 @@ public sealed class EdgeWindow : Window
             {
                 pressing = dragging = expanded = false;
                 menu.IsOpen = false;
-                UpdateAppearance();
+                PositionButton(animate: false);
             }
         };
     }
@@ -124,7 +127,11 @@ public sealed class EdgeWindow : Window
             && Math.Abs(cursor.Y - pressPoint.Y) < SystemParameters.MinimumVerticalDragDistance * placement.Monitor.ScaleY)
             return;
 
-        dragging = true;
+        if (!dragging)
+        {
+            dragging = true;
+            PositionButton(animate: false);
+        }
         Place(EdgePlacement.DragBounds(NativeMethods.ClosestMonitor(cursor.X, cursor.Y), cursor.X, cursor.Y));
     }
 
@@ -162,9 +169,7 @@ public sealed class EdgeWindow : Window
     {
         if (!IsVisible || pressing || dragging || menu.IsOpen)
             return;
-        if (NativeMethods.GetCursorPos(out var point))
-            SetExpanded(point.X >= currentBounds.Left && point.X < currentBounds.Right
-                && point.Y >= currentBounds.Top && point.Y < currentBounds.Bottom);
+        SetExpanded(button.IsMouseOver);
     }));
 
     private void SetExpanded(bool value)
@@ -172,16 +177,39 @@ public sealed class EdgeWindow : Window
         if (expanded == value || !IsVisible)
             return;
         expanded = value;
-        UpdateAppearance();
-        ApplyDocking();
+        PositionButton(animate: true);
     }
 
-    private void UpdateAppearance()
+    private void PositionButton(bool animate)
     {
-        icon.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
-        Opacity = expanded ? 1 : .58;
-        ToolTipService.SetIsEnabled(button, expanded);
+        double x = 0, y = 0;
+        double opacity = expanded ? 1 : IdleOpacity;
+        if (!expanded && placement.Monitor is { } monitor)
+        {
+            // The clipped viewport stays inside the work area, including at monitor seams and taskbars.
+            var bounds = placement.Bounds();
+            double recessedX = Math.Max(0, bounds.Width / monitor.ScaleX - EdgePlacement.HandleThickness);
+            double recessedY = Math.Max(0, bounds.Height / monitor.ScaleY - EdgePlacement.HandleThickness);
+            x = placement.Edge == DockEdge.Left ? -recessedX : placement.Edge == DockEdge.Right ? recessedX : 0;
+            y = placement.Edge == DockEdge.Top ? -recessedY : placement.Edge == DockEdge.Bottom ? recessedY : 0;
+        }
+
+        bool useMotion = animate && SystemParameters.ClientAreaAnimation;
+        slide.BeginAnimation(TranslateTransform.XProperty, Transition(slide.X, x, useMotion));
+        slide.X = x;
+        slide.BeginAnimation(TranslateTransform.YProperty, Transition(slide.Y, y, useMotion));
+        slide.Y = y;
+        button.BeginAnimation(OpacityProperty, Transition(button.Opacity, opacity, useMotion));
+        button.Opacity = opacity;
     }
+
+    private static DoubleAnimation? Transition(double from, double to, bool animate) => animate && from != to
+        ? new DoubleAnimation(from, to, TimeSpan.FromMilliseconds(160))
+        {
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+            FillBehavior = FillBehavior.Stop
+        }
+        : null;
 
     private void ApplyDocking()
     {
@@ -195,7 +223,8 @@ public sealed class EdgeWindow : Window
             _ => PlacementMode.Top
         };
         ContextMenuService.SetPlacement(button, menu.Placement);
-        Place(placement.Bounds(expanded));
+        Place(placement.Bounds());
+        PositionButton(animate: false);
     }
 
     private void Place(PhysicalRect bounds)
@@ -203,7 +232,6 @@ public sealed class EdgeWindow : Window
         var handle = new WindowInteropHelper(this).Handle;
         if (handle != IntPtr.Zero)
             NativeMethods.Place(handle, bounds, show: false);
-        currentBounds = bounds;
     }
 
     private void ResetPosition()
