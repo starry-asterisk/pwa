@@ -54,6 +54,7 @@ test('accepts the Windows file launch, waits for the current editor, and saves t
   const response = await page.request.get('./manifest.webmanifest')
   expect(response.ok()).toBe(true)
   const manifest = await response.json()
+  expect(manifest.launch_handler).toEqual({ client_mode: 'focus-existing' })
   expect(manifest.file_handlers).toContainEqual({
     action: manifest.scope, accept: { 'application/vnd.moa.capture+zip': ['.moacapture'] },
   })
