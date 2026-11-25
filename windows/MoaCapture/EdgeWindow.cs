@@ -19,6 +19,8 @@ public sealed class EdgeWindow : Window
     private readonly Grid viewport = new() { ClipToBounds = true };
     private readonly TranslateTransform slide = new();
     private readonly ContextMenu menu = new();
+    // The extra hover area is sensed without making transparent pixels absorb clicks.
+    private readonly DispatcherTimer hoverTimer = new(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(40) };
     private EdgePlacement placement;
     private NativeMethods.POINT pressPoint;
     private bool pressing, dragging, expanded;
@@ -70,6 +72,8 @@ public sealed class EdgeWindow : Window
 
         button.MouseEnter += (_, _) => SetExpanded(true);
         button.MouseLeave += (_, _) => RefreshHover();
+        hoverTimer.Tick += (_, _) => CheckHover();
+        Closed += (_, _) => hoverTimer.Stop();
         button.PreviewMouseLeftButtonDown += (_, _) =>
         {
             pressing = NativeMethods.GetCursorPos(out pressPoint);
@@ -98,10 +102,12 @@ public sealed class EdgeWindow : Window
             if (IsVisible)
             {
                 ApplyDocking();
+                hoverTimer.Start();
                 RefreshHover();
             }
             else
             {
+                hoverTimer.Stop();
                 pressing = dragging = expanded = false;
                 menu.IsOpen = false;
                 PositionButton(animate: false);
@@ -165,12 +171,15 @@ public sealed class EdgeWindow : Window
             ApplyDocking();
     }
 
-    private void RefreshHover() => Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() =>
+    private void RefreshHover() => Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(CheckHover));
+
+    private void CheckHover()
     {
         if (!IsVisible || pressing || dragging || menu.IsOpen)
             return;
-        SetExpanded(button.IsMouseOver);
-    }));
+        SetExpanded(button.IsMouseOver || (placement.Monitor is not null
+            && NativeMethods.GetCursorPos(out var cursor) && placement.IsNearHandle(cursor)));
+    }
 
     private void SetExpanded(bool value)
     {

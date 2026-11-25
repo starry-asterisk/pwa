@@ -13,7 +13,7 @@
     <ApplicationIcon>Assets\Moa.ico</ApplicationIcon>
     <Product>모아 캡처</Product>
     <Description>모아의 Windows 화면 캡처 및 녹화 도구</Description>
-    <Version>0.2.3</Version>
+    <Version>0.2.4</Version>
     <PlatformTarget>x64</PlatformTarget>
     <PublishSingleFile>false</PublishSingleFile>
     <PublishTrimmed>false</PublishTrimmed>

@@ -8,6 +8,7 @@ internal readonly record struct EdgePlacement(CaptureMonitor Monitor, DockEdge E
 {
     public const int ButtonSize = 48;
     public const int HandleThickness = 8;
+    private const int HoverPadding = 5;
     private const int LegacyWidth = 52;
     private const int LegacyHeight = 76;
 
@@ -64,6 +65,23 @@ internal readonly record struct EdgePlacement(CaptureMonitor Monitor, DockEdge E
             _ => CenteredOrigin(Along, work.Top, work.Height, height)
         };
         return new(x, y, width, height);
+    }
+
+    public bool IsNearHandle(NativeMethods.POINT point)
+    {
+        var bounds = Bounds();
+        if (point.X < bounds.Left || point.X >= bounds.Right || point.Y < bounds.Top || point.Y >= bounds.Bottom)
+            return false;
+
+        int depth = Edge switch
+        {
+            DockEdge.Left => point.X - bounds.Left,
+            DockEdge.Right => bounds.Right - 1 - point.X,
+            DockEdge.Top => point.Y - bounds.Top,
+            _ => bounds.Bottom - 1 - point.Y
+        };
+        double scale = IsVertical(Edge) ? Monitor.ScaleX : Monitor.ScaleY;
+        return depth < Pixels(HandleThickness + HoverPadding, scale);
     }
 
     public static PhysicalRect DragBounds(CaptureMonitor monitor, int x, int y)

@@ -21,6 +21,7 @@ public sealed class CaptureApplication : Application
     private CaptureSession? selection;
     private ScreenRecorder? recorder;
     private RecordingWindow? recordingControls;
+    private UpdateStatusWindow? updateStatus;
     private bool capturing;
     private bool exitRequested;
 
@@ -82,6 +83,7 @@ public sealed class CaptureApplication : Application
             return;
         capturing = true;
         edge.Hide();
+        updateStatus?.Hide();
         try
         {
             if (mode == CaptureMode.Recording)
@@ -126,7 +128,10 @@ public sealed class CaptureApplication : Application
             if (exitRequested)
                 Shutdown();
             else
+            {
                 edge.Show();
+                updateStatus?.Show();
+            }
         }
     }
 
@@ -252,9 +257,32 @@ public sealed class CaptureApplication : Application
     {
         if (capturing || exitRequested)
             return;
+
+        var status = updateStatus;
+        if (status is null)
+        {
+            status = new UpdateStatusWindow();
+            updateStatus = status;
+            status.Closed += (_, _) => updateStatus = null;
+            status.Show();
+            status.Activate();
+        }
+        else
+        {
+            if (status.WindowState == WindowState.Minimized)
+                status.WindowState = WindowState.Normal;
+            status.Activate();
+            if (status.IsChecking)
+                return;
+            status.ShowChecking();
+        }
+
+        await Dispatcher.Yield(DispatcherPriority.Background);
+        if (exitRequested)
+            return;
         string message = await DesktopUpdater.CheckAsync();
-        if (!capturing && !exitRequested)
-            MessageBox.Show(message, "모아 캡처 업데이트", MessageBoxButton.OK, MessageBoxImage.Information);
+        if (!exitRequested && ReferenceEquals(updateStatus, status))
+            status.ShowResult(message);
     }
 
     private void DisplaysChanged(object? sender, EventArgs args) => Dispatcher.BeginInvoke(DispatcherPriority.Normal, new Action(() =>
