@@ -85,8 +85,8 @@ public static class NativeMethods
         long distance = long.MaxValue;
         foreach (var monitor in monitors)
         {
-            long dx = Math.Max(monitor.Bounds.Left - x, Math.Max(0, x - monitor.Bounds.Right));
-            long dy = Math.Max(monitor.Bounds.Top - y, Math.Max(0, y - monitor.Bounds.Bottom));
+            long dx = Math.Max(monitor.Bounds.Left - x, Math.Max(0, x - (monitor.Bounds.Right - 1)));
+            long dy = Math.Max(monitor.Bounds.Top - y, Math.Max(0, y - (monitor.Bounds.Bottom - 1)));
             long d = dx * dx + dy * dy;
             if (d < distance)
             {
@@ -96,9 +96,10 @@ public static class NativeMethods
         }
         return best;
     }
-    public static void Place(IntPtr window, PhysicalRect bounds, bool activate = false)
+    public static void Place(IntPtr window, PhysicalRect bounds, bool activate = false, bool show = true)
     {
-        if (!SetWindowPos(window, new IntPtr(-1), bounds.Left, bounds.Top, bounds.Width, bounds.Height, activate ? 0x0040u : 0x0050u))
+        uint flags = (activate ? 0u : 0x0010u) | (show ? 0x0040u : 0u);
+        if (!SetWindowPos(window, new IntPtr(-1), bounds.Left, bounds.Top, bounds.Width, bounds.Height, flags))
             throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
     }
 }

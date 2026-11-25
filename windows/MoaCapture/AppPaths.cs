@@ -30,6 +30,7 @@ public static class AppPaths
 }
 public sealed class CaptureSettings
 {
+    public DockEdge? DockSide { get; set; }
     public int? EdgeX
     {
         get; set;
