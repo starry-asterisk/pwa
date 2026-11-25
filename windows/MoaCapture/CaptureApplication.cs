@@ -74,7 +74,7 @@ public sealed class CaptureApplication : Application
         tray = new Forms.NotifyIcon { Icon = trayIcon, Text = Brand.Name, Visible = true, ContextMenuStrip = menu };
         tray.DoubleClick += (_, _) => Dispatcher.BeginInvoke(new Action(() => _ = StartCaptureAsync(CaptureMode.Region)));
         SystemEvents.DisplaySettingsChanged += DisplaysChanged;
-        _ = DesktopUpdater.CheckAsync();
+        DesktopUpdater.BeginCheck();
     }
 
     private async Task StartCaptureAsync(CaptureMode mode)
@@ -261,7 +261,7 @@ public sealed class CaptureApplication : Application
         var status = updateStatus;
         if (status is null)
         {
-            status = new UpdateStatusWindow();
+            status = new UpdateStatusWindow(RestartToApplyUpdate);
             updateStatus = status;
             status.Closed += (_, _) => updateStatus = null;
             status.Show();
@@ -272,17 +272,59 @@ public sealed class CaptureApplication : Application
             if (status.WindowState == WindowState.Minimized)
                 status.WindowState = WindowState.Normal;
             status.Activate();
-            if (status.IsChecking)
+            if (status.IsBusy)
                 return;
             status.ShowChecking();
         }
 
         await Dispatcher.Yield(DispatcherPriority.Background);
-        if (exitRequested)
+        if (exitRequested || !ReferenceEquals(updateStatus, status))
             return;
-        string message = await DesktopUpdater.CheckAsync();
-        if (!exitRequested && ReferenceEquals(updateStatus, status))
-            status.ShowResult(message);
+
+        var check = DesktopUpdater.BeginCheck();
+        int lastProgress = -1;
+        void RefreshProgress()
+        {
+            int percent = check.DownloadProgress;
+            if (percent >= 0 && percent != lastProgress)
+            {
+                lastProgress = percent;
+                status.ShowDownloading(percent);
+            }
+        }
+
+        var progressTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(100) };
+        progressTimer.Tick += (_, _) => RefreshProgress();
+        EventHandler stopTimer = (_, _) => progressTimer.Stop();
+        status.Closed += stopTimer;
+        try
+        {
+            RefreshProgress();
+            progressTimer.Start();
+            var result = await check.Completion;
+            if (!exitRequested && ReferenceEquals(updateStatus, status))
+                status.ShowResult(result.Message, result.CanRestart);
+        }
+        finally
+        {
+            progressTimer.Stop();
+            status.Closed -= stopTimer;
+        }
+    }
+
+    private void RestartToApplyUpdate()
+    {
+        if (capturing || exitRequested)
+            return;
+
+        var error = DesktopUpdater.ScheduleRestart();
+        if (error is not null)
+        {
+            updateStatus?.ShowResult(error.Message, error.CanRestart);
+            return;
+        }
+
+        RequestExit();
     }
 
     private void DisplaysChanged(object? sender, EventArgs args) => Dispatcher.BeginInvoke(DispatcherPriority.Normal, new Action(() =>
