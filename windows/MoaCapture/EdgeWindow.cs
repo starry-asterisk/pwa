@@ -11,15 +11,14 @@ namespace MoaCapture;
 public sealed class EdgeWindow : Window
 {
     private readonly CaptureSettings settings;
-    private readonly Action capture;
     private readonly Button button;
     private bool pressing, moved;
     private int offsetX, offsetY;
-    public EdgeWindow(CaptureSettings settings, Action capture, Action checkUpdates)
+    public EdgeWindow(CaptureSettings settings, Action<CaptureMode> capture, Action checkUpdates, Action exit)
     {
         this.settings = settings;
-        this.capture = capture;
-        Title = "모아 캡처";
+        Title = Brand.Name;
+        Icon = Brand.Image;
         WindowStyle = WindowStyle.None;
         ResizeMode = ResizeMode.NoResize;
         AllowsTransparency = true;
@@ -31,7 +30,7 @@ public sealed class EdgeWindow : Window
         Height = 76;
         Opacity = .7;
         var panel = new StackPanel { HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
-        panel.Children.Add(new TextBlock { Text = "▣", FontSize = 26, Foreground = Brushes.White, HorizontalAlignment = HorizontalAlignment.Center });
+        panel.Children.Add(new System.Windows.Controls.Image { Source = Brand.Image, Width = 32, Height = 32 });
         panel.Children.Add(new TextBlock { Text = "모아", FontSize = 12, FontWeight = FontWeights.SemiBold, Foreground = Brushes.White, HorizontalAlignment = HorizontalAlignment.Center });
         button = Theme.Button("", true);
         button.Content = panel;
@@ -39,9 +38,8 @@ public sealed class EdgeWindow : Window
         button.Padding = new Thickness(2);
         button.BorderThickness = new Thickness(0);
         Content = button;
-        AutomationProperties.SetName(button, "화면 캡처");
-        button.ToolTip = "클릭해서 화면 캡처 · 드래그해서 위치 이동";
-        button.Click += (_, _) => capture();
+        AutomationProperties.SetName(button, "모아 캡처 메뉴");
+        button.ToolTip = "클릭해서 캡처 메뉴 열기 · 드래그해서 위치 이동";
         MouseEnter += (_, _) => Opacity = 1;
         MouseLeave += (_, _) => { if (!pressing) Opacity = .7; };
         button.PreviewMouseLeftButtonDown += (_, _) => { pressing = true; moved = false; NativeMethods.GetCursorPos(out var p); NativeMethods.GetWindowRect(new WindowInteropHelper(this).Handle, out var r); offsetX = p.X - r.Left; offsetY = p.Y - r.Top; };
@@ -62,14 +60,22 @@ public sealed class EdgeWindow : Window
         };
         button.PreviewMouseLeftButtonUp += (_, e) => { pressing = false; if (moved) { e.Handled = true; button.ReleaseMouseCapture(); SavePosition(); } moved = false; };
         var menu = new ContextMenu();
-        AddItem(menu, "화면 캡처", () => capture());
+        foreach (var mode in CaptureOptions.Modes)
+            AddItem(menu, mode.Label, () => capture(mode.Mode));
+        menu.Items.Add(new Separator());
         AddItem(menu, "모아 열기", () => Process.Start(new ProcessStartInfo("https://starry-asterisk.github.io/pwa/") { UseShellExecute = true }));
         menu.Items.Add(new Separator());
         AddItem(menu, "버튼 위치 초기화", () => { settings.EdgeX = null; settings.EdgeY = null; PlaceInitial(); settings.Save(); });
         AddItem(menu, "업데이트 확인", checkUpdates);
         menu.Items.Add(new Separator());
-        AddItem(menu, "종료", () => System.Windows.Application.Current.Shutdown());
+        AddItem(menu, "종료", exit);
         button.ContextMenu = menu;
+        button.Click += (_, _) =>
+        {
+            menu.PlacementTarget = button;
+            menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Left;
+            menu.IsOpen = true;
+        };
         SourceInitialized += (_, _) =>
         {
             PlaceInitial();

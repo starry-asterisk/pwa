@@ -1,4 +1,11 @@
-export interface SharedCapture { id: string; title: string; text: string; files: File[]; createdAt: string }
+export interface SharedCapture {
+  id: string
+  title: string
+  text: string
+  files: File[]
+  createdAt: string
+  recording?: { width: number; height: number }
+}
 function openInbox(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open('moa-share-inbox', 1)

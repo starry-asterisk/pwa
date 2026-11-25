@@ -26,17 +26,21 @@ interface SaveParams {
   p_origin_device_id: string
 }
 interface RpcResult {
-  data: { status: 'saved' | 'conflict'; note: CloudNote } | null
-  error: { message: string } | null
+  data: { status: 'saved' | 'conflict'; note: CloudNote } | boolean | null
+  error: { message: string; code?: string } | null
 }
 
 function fakeCloud(initial: CloudNote[] = []) {
-  const state = { owner: ownerId }
+  const state = { owner: ownerId, supportsRecordings: true }
   const remote = new Map(initial.map(note => [note.id, structuredClone(note)]))
   const images = new Map<string, Blob>()
   const calls: string[] = []
   const hooks: { afterSave?: () => Promise<void>; afterDownload?: () => Promise<void> } = {}
-  const rpc = vi.fn(async (_name: string, params: SaveParams): Promise<RpcResult> => {
+  const rpc = vi.fn(async (name: string, params: SaveParams): Promise<RpcResult> => {
+    if (name === 'supports_recording_sync') {
+      return state.supportsRecordings ? { data: true, error: null }
+        : { data: null, error: { message: 'Unknown function', code: 'PGRST202' } }
+    }
     calls.push('save')
     const existing = remote.get(params.p_id)
     if (existing && existing.version !== params.p_version && existing.version !== params.p_expected_version) {
@@ -99,6 +103,39 @@ describe('local-first cloud synchronization', () => {
     expect(await db.notes.get(note.id)).toMatchObject({ dirty: false, baseVersion: note.version })
     expect((await db.notes.get(unrelated.id))?.dirty).toBe(true)
     expect(report.uploaded).toBe(1)
+  })
+
+  it('keeps recordings local on the old schema, then uploads and pulls the MP4 with its note', async () => {
+    const media = { id: crypto.randomUUID(), name: 'recording.mp4', size: 16, width: 640, height: 360,
+      mime: 'video/mp4' as const, createdAt: new Date().toISOString() }
+    const recording = await createNote(ownerId, { title: '녹화 메모', attachments: [media] })
+    const text = await createNote(ownerId, { body: '다른 메모' })
+    await db.images.put({ ...media, blob: new Blob([new Uint8Array(media.size)], { type: 'video/mp4' }) })
+    const cloud = fakeCloud()
+    cloud.state.supportsRecordings = false
+    const prior = await syncNotes(cloud.client, ownerId)
+    expect(prior).toMatchObject({ uploaded: 1, pendingRecordings: 1 })
+    expect(cloud.remote.has(text.id)).toBe(true)
+    expect(cloud.remote.has(recording.id)).toBe(false)
+    expect(cloud.upload).not.toHaveBeenCalled()
+    expect((await db.notes.get(recording.id))?.dirty).toBe(true)
+
+    cloud.state.supportsRecordings = true
+    const upgraded = await syncNotes(cloud.client, ownerId)
+    expect(upgraded).toMatchObject({ uploaded: 1 })
+    expect(upgraded.pendingRecordings).toBeUndefined()
+    const object = ownerId + '/' + media.id + '.mp4'
+    expect(cloud.images.get(object)?.type).toBe('video/mp4')
+    expect(cloud.remote.get(recording.id)?.data.attachments).toEqual([media])
+    expect((await db.notes.get(recording.id))?.dirty).toBe(false)
+
+    await db.notes.delete(recording.id)
+    await db.images.delete(media.id)
+    const pulled = await syncNotes(cloud.client, ownerId)
+    expect(pulled.downloaded).toBe(1)
+    expect(cloud.download).toHaveBeenCalledWith(object)
+    expect((await db.images.get(media.id))?.blob.type).toBe('video/mp4')
+    expect((await db.notes.get(recording.id))?.attachments).toEqual([media])
   })
 
   it('preserves both edits as a synchronized conflict copy instead of silently overwriting', async () => {

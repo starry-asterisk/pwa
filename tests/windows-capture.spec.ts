@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { expect, test, type Page } from '@playwright/test'
 import { strToU8, zipSync } from 'fflate'
@@ -116,4 +117,35 @@ test('recovers a capture when the browser blocks reading its OS file handle', as
   const editor = page.getByRole('dialog', { name: '메모 편집', exact: true })
   await expect(editor.getByRole('textbox', { name: '메모 내용' })).toHaveValue(capture.text)
   await expect(editor.getByRole('img', { name: 'capture.png', exact: true })).toBeVisible()
+})
+
+test('plays and downloads a native Windows recording saved through file launch', async ({ page }) => {
+  // A short, synthetic solid-color capture encoded by Windows Media Foundation.
+  const recording = await readFile(new URL('./fixtures/windows-recording.mp4', import.meta.url))
+  const title = 'Windows 화면 녹화'
+  const manifest = {
+    format: 'moa-capture', schemaVersion: 2, id: randomUUID(), createdAt: new Date().toISOString(), title, text: '',
+    video: { path: 'video.mp4', name: 'recording.mp4', mime: 'video/mp4', size: recording.byteLength, width: 640, height: 360 },
+  }
+  const file = Buffer.from(zipSync({ 'manifest.json': strToU8(JSON.stringify(manifest)), 'video.mp4': recording }, { level: 0 }))
+  await openFromWindows(page, file)
+  const editor = page.getByRole('dialog', { name: '메모 편집', exact: true })
+  await expect(editor.getByRole('textbox', { name: '메모 제목' })).toHaveValue(title)
+  const video = editor.locator('video')
+  await expect(video).toBeVisible()
+  await expect.poll(() => video.evaluate(element => element.videoWidth)).toBe(640)
+  await video.evaluate(async element => { await element.play() })
+  await expect.poll(() => video.evaluate(element => element.currentTime)).toBeGreaterThan(0)
+  const download = page.waitForEvent('download')
+  await editor.getByRole('button', { name: 'recording.mp4 MP4로 다운로드' }).click()
+  const downloaded = await download
+  expect(downloaded.suggestedFilename()).toBe('recording.mp4')
+  expect(await readFile(await downloaded.path())).toEqual(recording)
+
+  await editor.getByRole('button', { name: '완료', exact: true }).click()
+  await page.reload()
+  const card = page.getByRole('button', { name: title + ' 메모 열기', exact: true })
+  await expect(card).toContainText('녹화 메모')
+  await card.click()
+  await expect.poll(() => video.evaluate(element => element.videoHeight)).toBe(360)
 })

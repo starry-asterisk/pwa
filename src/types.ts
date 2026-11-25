@@ -4,7 +4,7 @@ export interface Attachment {
   size: number
   width: number
   height: number
-  mime: 'image/webp'
+  mime: 'image/webp' | 'video/mp4'
   createdAt: string
 }
 export interface NoteContent {
@@ -25,8 +25,11 @@ export interface Note extends NoteContent {
   originDeviceId: string
   cloudOwnerId: string | null
 }
-export interface StoredImage extends Attachment {
+export interface StoredAttachment extends Attachment {
   blob: Blob
+}
+export interface StoredImage extends StoredAttachment {
+  mime: 'image/webp'
 }
 export interface CloudConfig {
   url: string
@@ -45,5 +48,6 @@ export interface SyncReport {
   uploaded: number
   downloaded: number
   conflicts: number
+  pendingRecordings?: number
 }
 export type NoteFilter = 'all' | 'pinned' | 'images' | 'trash'

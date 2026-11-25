@@ -16,3 +16,21 @@ html{scrollbar-gutter:auto}.sidebar{z-index:70;width:254px;padding-top:max(28px,
 }
 @media(max-width:360px){.workspace{padding-right:15px;padding-left:15px}.breadcrumb{font-size:0}.breadcrumb>span{display:none}.breadcrumb>strong{font-size:14px}.saved-state>span{max-width:85px;font-size:12px}.editor-scroll{padding-right:18px;padding-left:18px}.settings-storage-grid{grid-template-columns:minmax(0,1fr)}.storage-stat{display:flex;align-items:center;justify-content:space-between;padding:10px 13px}.storage-stat>span{margin:0}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important;animation-duration:.01ms!important;animation-iteration-count:1!important}.note-card:hover{transform:none}}
+.video-card-preview {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  min-height: inherit;
+  color: #77629c;
+  background: #f0ebf8;
+}
+.editor-video {
+  grid-column: 1 / -1;
+}
+.video-player {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: min(48dvh, 480px);
+  background: #181524;
+}

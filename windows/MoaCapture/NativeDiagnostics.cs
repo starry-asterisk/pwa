@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using System.Windows;
@@ -32,12 +33,21 @@ public static class NativeDiagnostics
             fixture.Activate();
             await Dispatcher.Yield(DispatcherPriority.Render);
             await Task.Delay(280);
+            Require(Brand.Image.PixelWidth == 192, "The PWA brand image is missing from the companion.");
+            using (var icon = Brand.CreateTrayIcon())
+                Require(icon.Width == 32, "The companion tray icon is missing.");
             var topLeft = fixture.PointToScreen(new Point(12, 12));
             var bottomRight = fixture.PointToScreen(new Point(fixture.ActualWidth - 24, fixture.ActualHeight - 50));
             var rectangle = new PhysicalRect((int)topLeft.X, (int)topLeft.Y, (int)(bottomRight.X - topLeft.X), (int)(bottomRight.Y - topLeft.Y));
             var snapshots = ScreenCapture.FreezeDisplays();
             foreach (var snapshot in snapshots)
                 Require(snapshot.Image.PixelWidth == snapshot.Monitor.Bounds.Width && snapshot.Image.PixelHeight == snapshot.Monitor.Bounds.Height, "Physical monitor capture dimensions differ.");
+            var desktop = ScreenCapture.CaptureDesktop();
+            Require(desktop.Width == ScreenCapture.GetDesktopBounds().Width && desktop.Height == ScreenCapture.GetDesktopBounds().Height, "Full desktop capture dimensions differ.");
+            var recorder = ScreenRecorder.Start(rectangle, Path.Combine(AppPaths.DataDirectory, "recordings"));
+            await Task.Delay(500);
+            var recording = await recorder.StopAsync();
+            Require(recording.Duration > TimeSpan.Zero && recording.Width <= 1280 && recording.Height <= 720, "The Windows recording did not produce bounded video.");
             fixture.Hide();
             session = new CaptureSession(snapshots);
             Task<CapturedImage?> selection = session.RunAsync();
@@ -60,27 +70,63 @@ public static class NativeDiagnostics
                 using var manifest = JsonDocument.Parse(archive.GetEntry("manifest.json")!.Open());
                 Require(manifest.RootElement.GetProperty("text").GetString() == recognized.Text, "OCR text was not retained in the package.");
             }
-            var automaticOpen = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-            using var automaticBridge = new NativeHandoffBridge(path => automaticOpen.TrySetResult(path));
-            int reopenCount = 0;
-            var automaticPreview = new CaptureResultWindow(capture, recognizer, automaticBridge, path =>
+            string? automaticPath = null;
+            using var automaticBridge = new NativeHandoffBridge(path => automaticPath = path);
+            var delivery = new CaptureDelivery(recognizer, automaticBridge);
+            await delivery.SendImageAsync(capture, "영역 캡처").WaitAsync(TimeSpan.FromSeconds(15));
+            Require(automaticPath is not null && File.Exists(automaticPath) && FindRecovery() is null, "Successful capture did not open directly in the PWA.");
+            automaticPath = null;
+            await delivery.SendRecordingAsync(recording).WaitAsync(TimeSpan.FromSeconds(15));
+            Require(automaticPath is not null && File.Exists(automaticPath) && FindRecovery() is null, "Successful recording did not open directly in the PWA.");
+            using (var archive = ZipFile.OpenRead(automaticPath!))
             {
-                Require(automaticOpen.Task.IsCompleted && path == automaticOpen.Task.Result, "Retry selected a different capture file.");
-                reopenCount++;
+                Require(archive.Entries.Count == 2 && archive.GetEntry("video.mp4")?.Length == new FileInfo(recording.FilePath).Length, "The handoff did not include the MP4.");
+                using var videoManifest = JsonDocument.Parse(archive.GetEntry("manifest.json")!.Open());
+                Require(videoManifest.RootElement.GetProperty("schemaVersion").GetInt32() == 2
+                    && videoManifest.RootElement.GetProperty("video").GetProperty("width").GetInt32() == recording.Width, "The MP4 manifest did not use the expected schema and dimensions.");
+            }
+            File.Delete(recording.FilePath);
+
+            string? firstPath = null;
+            int launchCount = 0;
+            using var flakyBridge = new NativeHandoffBridge(path =>
+            {
+                if (++launchCount == 1)
+                {
+                    firstPath = path;
+                    throw new System.ComponentModel.Win32Exception("No default app for the test capture.");
+                }
+                Require(path == firstPath, "Retry selected a different capture file.");
             });
-            automaticPreview.Show();
+            var recoveryDelivery = new CaptureDelivery(recognizer, flakyBridge);
+            // ShowDialog runs a nested dispatcher loop, including the timer that acts on recovery.
+            var recoveryHandled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
+            timer.Tick += (_, _) =>
+            {
+                if (FindRecovery() is not { } recovery)
+                    return;
+                timer.Stop();
+                var reopen = FindButton(recovery, "다시 시도");
+                if (reopen is null)
+                {
+                    recoveryHandled.SetException(new InvalidOperationException("The capture retry button was not found."));
+                    recovery.Close();
+                    return;
+                }
+                reopen.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                recoveryHandled.SetResult();
+            };
+            timer.Start();
             try
             {
-                Task finished = await Task.WhenAny(automaticOpen.Task, Task.Delay(15_000));
-                Require(finished == automaticOpen.Task && File.Exists(await automaticOpen.Task), "The result window did not automatically hand off the OCR capture.");
-                await Dispatcher.Yield(DispatcherPriority.Background);
-                int stagedCount = Directory.GetFiles(Path.Combine(AppPaths.DataDirectory, "handoff"), "*.moacapture").Length;
-                var reopen = FindButton(automaticPreview, "모아에서 다시 열기") ?? throw new InvalidOperationException("The staged capture retry button was not found.");
-                reopen.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                await Dispatcher.Yield(DispatcherPriority.Background);
-                Require(reopenCount == 1 && Directory.GetFiles(Path.Combine(AppPaths.DataDirectory, "handoff"), "*.moacapture").Length == stagedCount, "Retry created a duplicate capture package.");
+                int stagedCount = Directory.GetFiles(AppPaths.GetHandoffDirectory(), "*.moacapture").Length;
+                await recoveryDelivery.SendImageAsync(capture, "영역 캡처").WaitAsync(TimeSpan.FromSeconds(15));
+                await recoveryHandled.Task.WaitAsync(TimeSpan.FromSeconds(2));
+                Require(launchCount == 2 && FindRecovery() is null
+                    && Directory.GetFiles(AppPaths.GetHandoffDirectory(), "*.moacapture").Length == stagedCount + 1, "Retry created a duplicate capture or left the recovery window open.");
             }
-            finally { automaticPreview.Close(); }
+            finally { timer.Stop(); FindRecovery()?.Close(); }
             await File.WriteAllTextAsync(reportPath, JsonSerializer.Serialize(new
             {
                 passed = true,
@@ -92,7 +138,10 @@ public static class NativeDiagnostics
                     negativeCoordinatesAndMixedDpi = true,
                     localOcr = true,
                     fileHandoff = true,
-                    automaticResultHandoff = true,
+                    directHandoffWithoutPreview = true,
+                    fullscreenCapture = true,
+                    mp4RecordingAndHandoff = true,
+                    matchingBrandAssets = true,
                     idempotentRetry = true,
                     downloadsAndDocumentsFallback = true,
                     protectedPathRejected = true,
@@ -218,4 +267,6 @@ public static class NativeDiagnostics
                 return found;
         return null;
     }
+
+    private static CaptureResultWindow? FindRecovery() => Application.Current.Windows.OfType<CaptureResultWindow>().FirstOrDefault();
 }

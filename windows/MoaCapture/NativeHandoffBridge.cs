@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -24,6 +25,7 @@ public sealed record HandoffResult(bool Success, string Message)
 public sealed class NativeHandoffBridge : IDisposable
 {
     private const int MaximumImageBytes = 25 * 1024 * 1024;
+    private const int MaximumVideoBytes = 20 * 1024 * 1024;
     private const int MaximumManifestBytes = 2 * 1024 * 1024;
     private const int MaximumTextCharacters = 100_000;
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -66,8 +68,48 @@ public sealed class NativeHandoffBridge : IDisposable
                 height = payload.PixelHeight
             }
         }, JsonOptions);
-        if (manifest.Length > MaximumManifestBytes) throw new InvalidOperationException("캡처한 텍스트가 너무 큽니다.");
+        return await StageAndOpenAsync(id, manifest, "image.png", (stream, token) => stream.WriteAsync(image, token), cancellationToken);
+    }
 
+    public async Task<HandoffResult> OpenRecordingAsync(ScreenRecording recording, CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        cancellationToken.ThrowIfCancellationRequested();
+        await using var video = new FileStream(recording.FilePath, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, FileOptions.Asynchronous);
+        byte[] header = new byte[12];
+        if (video.Length < 20 || video.Length > MaximumVideoBytes || recording.Width is < 2 or > 1920 || recording.Height is < 2 or > 1080)
+            throw new InvalidOperationException("전달할 녹화 파일의 크기나 해상도가 올바르지 않습니다.");
+        await video.ReadExactlyAsync(header, cancellationToken);
+        if (!header.AsSpan(4, 4).SequenceEqual("ftyp"u8))
+            throw new InvalidOperationException("MP4 녹화 파일만 전달할 수 있습니다.");
+        video.Position = 0;
+        var id = Guid.NewGuid().ToString("D");
+        var capturedAt = DateTimeOffset.Now;
+        var manifest = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            format = "moa-capture",
+            schemaVersion = 2,
+            id,
+            createdAt = capturedAt.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture),
+            title = $"화면 녹화 {capturedAt:M월 d일 HH:mm}",
+            text = "",
+            video = new
+            {
+                path = "video.mp4",
+                name = "recording.mp4",
+                mime = "video/mp4",
+                size = video.Length,
+                width = recording.Width,
+                height = recording.Height
+            }
+        }, JsonOptions);
+        return await StageAndOpenAsync(id, manifest, "video.mp4", (stream, token) => new ValueTask(video.CopyToAsync(stream, token)), cancellationToken);
+    }
+
+    private async Task<HandoffResult> StageAndOpenAsync(string id, byte[] manifest, string mediaPath,
+        Func<Stream, CancellationToken, ValueTask> writeMedia, CancellationToken cancellationToken)
+    {
+        if (manifest.Length > MaximumManifestBytes) throw new InvalidOperationException("캡처한 텍스트가 너무 큽니다.");
         var directory = AppPaths.GetHandoffDirectory();
         var filePath = Path.Combine(directory, $"{id}.moacapture");
         var writingPath = filePath + ".writing";
@@ -79,8 +121,8 @@ public sealed class NativeHandoffBridge : IDisposable
                 {
                     await using (var metadata = archive.CreateEntry("manifest.json", CompressionLevel.NoCompression).Open())
                         await metadata.WriteAsync(manifest, cancellationToken);
-                    await using (var pixels = archive.CreateEntry("image.png", CompressionLevel.NoCompression).Open())
-                        await pixels.WriteAsync(image, cancellationToken);
+                    await using (var media = archive.CreateEntry(mediaPath, CompressionLevel.NoCompression).Open())
+                        await writeMedia(media, cancellationToken);
                 }
                 await stream.FlushAsync(cancellationToken);
             }
@@ -94,6 +136,14 @@ public sealed class NativeHandoffBridge : IDisposable
             throw;
         }
 
+        return OpenStoredFile(filePath);
+    }
+
+    public HandoffResult OpenStoredFile(string filePath)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        if (!File.Exists(filePath))
+            return new HandoffResult(false, "캡처 파일을 찾지 못했습니다. 파일 위치를 확인해 주세요.") { FilePath = filePath };
         try
         {
             // Use the user's OS association. Never select a browser profile,
@@ -101,7 +151,7 @@ public sealed class NativeHandoffBridge : IDisposable
             requestOpen(filePath);
             return new HandoffResult(true, "모아에서 캡처 파일 열기를 요청했습니다. 앱에서 메모가 저장됐는지 확인해 주세요.") { FilePath = filePath };
         }
-        catch (Exception error) when (error is System.ComponentModel.Win32Exception or InvalidOperationException)
+        catch (Exception error) when (error is Win32Exception or InvalidOperationException)
         {
             return new HandoffResult(false, "캡처 파일을 보관했습니다. 설치한 모아를 .moacapture 파일의 연결 앱으로 선택하거나, 모아의 캡처 파일 열기로 가져와 주세요.") { FilePath = filePath };
         }

@@ -281,13 +281,13 @@ export default function SettingsDialog({ config, client, user, authenticated, on
               <p className="settings-help">작성한 내용은 이 기기에 먼저 저장됩니다.</p>
               <div className="settings-storage-grid">
                 <div className="storage-stat"><strong>{stats ? stats.notes.toLocaleString() : '…'}</strong><span>메모</span></div>
-                <div className="storage-stat"><strong>{stats ? stats.images.toLocaleString() : '…'}</strong><span>이미지</span></div>
-                <div className="storage-stat"><strong>{stats ? formatBytes(stats.imageBytes) : '…'}</strong><span>이미지 용량</span></div>
+                <div className="storage-stat"><strong>{stats ? stats.images.toLocaleString() : '…'}</strong><span>첨부 파일</span></div>
+                <div className="storage-stat"><strong>{stats ? formatBytes(stats.imageBytes) : '…'}</strong><span>첨부 파일 용량</span></div>
               </div>
             </section>
             <section className="settings-section">
               <h3>백업과 가져오기</h3>
-              <p className="settings-help">현재 계정과 로컬 전용 메모를 이미지와 함께 ZIP 파일로 보관하세요. 현재 백업 파일은 50MB까지 지원합니다.</p>
+              <p className="settings-help">현재 계정과 로컬 전용 메모를 이미지·녹화와 함께 ZIP 파일로 보관하세요. 현재 백업 파일은 50MB까지 지원합니다.</p>
               <div className="settings-actions">
                 <button type="button" className="button secondary" disabled={occupied} onClick={() => { void run('export', () => exportBackup(ownerId), '백업 파일을 내려받았습니다.') }}>
                   <Download size={16} />{busy === 'export' ? '백업 만드는 중…' : '백업 내보내기'}</button>
@@ -298,7 +298,7 @@ export default function SettingsDialog({ config, client, user, authenticated, on
                   event.target.value = ''
                   if (file) void run('import', async () => {
                     const result = await importBackup(file)
-                    notify(`메모 ${result.notes.toLocaleString()}개와 이미지 ${result.images.toLocaleString()}장을 이 기기에 가져왔습니다.`)
+                    notify(`메모 ${result.notes.toLocaleString()}개와 첨부 파일 ${(result.images + (result.recordings ?? 0)).toLocaleString()}개를 이 기기에 가져왔습니다.`)
                   })
                 }} />
               </div>
@@ -320,8 +320,8 @@ export default function SettingsDialog({ config, client, user, authenticated, on
               <p className="settings-help">휴대폰에서는 브라우저 메뉴의 ‘홈 화면에 추가’를, PC에서는 주소창의 설치 버튼을 이용하세요. 설치 후에는 인터넷 연결이 없어도 메모할 수 있습니다.</p>
             </section>
             {onWindowsCapture && /Windows/i.test(navigator.userAgent) && <section className="settings-section">
-              <h3>Windows 화면 캡처</h3>
-              <p className="settings-help">Chrome 또는 Edge에서 모아를 앱으로 설치한 뒤 보조 앱을 실행하세요. 화면의 반투명 버튼으로 영역을 고르면 캡처가 모아에서 열립니다. 처음에 연결 앱이나 파일 열기 권한을 묻는 경우 모아를 선택하고 허용하세요.</p>
+              <h3>모아 캡처</h3>
+              <p className="settings-help">Chrome 또는 Edge에서 모아를 앱으로 설치한 뒤 모아 캡처를 실행하세요. 화면의 반투명 버튼을 눌러 영역, 전체 화면, 창 캡처 또는 화면 녹화를 선택하세요. 결과는 모아에서 바로 열립니다. 처음 연결 앱이나 파일 열기 권한을 묻는다면 모아를 선택하고 허용하세요.</p>
               <div className="settings-actions">
                 <a className="button primary" href="https://github.com/starry-asterisk/pwa/releases/latest/download/Moa-Setup.exe"><Download size={16} aria-hidden="true" />Windows 보조 앱 설치 파일</a>
                 <button type="button" className="button secondary" onClick={() => captureInput.current?.click()}><Upload size={16} aria-hidden="true" />캡처 파일 열기</button>

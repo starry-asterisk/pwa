@@ -2,17 +2,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { registerSW } from 'virtual:pwa-register'
 import type { Session, SupabaseClient, User } from '@supabase/supabase-js'
-import { Check, CheckCheck, Cloud, CloudOff, Download, FileText, FolderHeart, Hash, Image as ImageIcon, LayoutGrid, LoaderCircle, Menu, Pin, Plus, Search, Settings2, Sparkles, Trash2, WifiOff, X } from 'lucide-react'
-import { attachImages, createNote, db, formatBytes, getSetting, setSetting, updateNote } from './lib/db'
+import { Check, CheckCheck, Cloud, CloudOff, Download, FileText, FolderHeart, Hash, Image as ImageIcon, LayoutGrid, LoaderCircle, Menu, Pin, Plus, Search, Settings2, Sparkles, Trash2, Video, WifiOff, X } from 'lucide-react'
+import { attachFiles, createNote, db, formatBytes, getSetting, setSetting, updateNote } from './lib/db'
 import { createCloudClient, signOutCloud, subscribeToNoteChanges, validateCloudConfig } from './lib/cloud'
 import { clearCachedOwner, readCachedOwner, writeCachedOwner, type LocalOwner } from './lib/offline-owner'
 import { adoptLocalNotes, syncNotes } from './lib/sync'
 import { optimizeImage } from './lib/media'
+import { storeRecording } from './lib/recording'
 import { deleteCapture, readCapture, type SharedCapture } from './lib/share-inbox'
 import { CaptureFileOpenError, listenForCaptureFiles, receiveCaptureFile } from './lib/capture-handoff'
 import { loginSessionId } from './lib/login-session'
 import { useNoteBackNavigation } from './lib/useNoteBackNavigation'
-import type { CloudConfig, Note, NoteFilter, StoredImage } from './types'
+import type { CloudConfig, Note, NoteFilter, StoredAttachment, StoredImage } from './types'
 import NoteEditor, { type NoteEditorHandle } from './components/NoteEditor'
 import SettingsDialog from './components/SettingsDialog'
 import ImageView from './components/ImageView'
@@ -29,6 +30,7 @@ const navigation = [
   { id: 'images', name: '이미지 모아보기', icon: ImageIcon },
   { id: 'trash', name: '휴지통', icon: Trash2 },
 ] as const
+function hasImage(note: Note) { return note.attachments.some(attachment => attachment.mime === 'image/webp') }
 function noteTitle(note: Note) { return note.title.trim() || note.body.trim().split('\n')[0].replace(/^#+\s*/, '').slice(0, 80) || '제목 없는 메모' }
 function excerpt(body: string) { return body.replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/^[#>*-]+\s*/gm, '').replace(/[`*_~]/g, '').trim() }
 function dateLabel(value: string) {
@@ -236,7 +238,7 @@ export default function App() {
   const visibleNotes = currentNotes.filter(note => {
     if (filter === 'trash' ? !note.deletedAt : Boolean(note.deletedAt)) return false
     if (filter === 'pinned' && !note.pinned) return false
-    if (filter === 'images' && !note.attachments.length) return false
+    if (filter === 'images' && !hasImage(note)) return false
     if (tag && !note.tags.includes(tag)) return false
     const query = search.trim().toLocaleLowerCase()
     return !query || `${note.title}\n${note.body}\n${note.tags.join(' ')}`.toLocaleLowerCase().includes(query)
@@ -264,7 +266,11 @@ export default function App() {
         const now = new Date().toISOString()
         setLastSynced(now); await setSetting('last-synced', now)
         if (report.conflicts) notify(`서로 다른 수정 내용을 ${report.conflicts}개의 충돌 사본으로 보관했어요.`)
-        else if (manual) notify('내 기기들의 메모를 최신 상태로 맞췄어요.')
+        if (report.pendingRecordings) {
+          const message = '녹화 메모는 이 기기에 저장했어요. 기기 간 녹화 동기화 설정을 확인해 주세요.'
+          setSyncError(message)
+          if (manual) notify(message)
+        } else if (manual && !report.conflicts) notify('내 기기들의 메모를 최신 상태로 맞췄어요.')
       } catch (error) {
         if (userRef.current?.id !== ownerId || clientRef.current !== currentClient) return
         const message = error instanceof Error ? error.message : '동기화하지 못했습니다.'
@@ -376,17 +382,18 @@ export default function App() {
       if (!note) {
         const capture = await readCapture(captureId)
         if (!capture) throw new Error('공유한 내용을 찾을 수 없습니다.')
-        const processedImages: StoredImage[] = []
-        for (const file of capture.files) processedImages.push(await optimizeImage(file))
+        const attachments: StoredAttachment[] = []
+        if (capture.recording) attachments.push(storeRecording(capture.files[0], capture.recording, capture.createdAt))
+        else for (const file of capture.files) attachments.push(await optimizeImage(file))
         if (!isCurrent()) return null
         note = await db.transaction('rw', db.notes, db.images, db.settings, async () => {
           if (!isCurrent()) throw new Error('계정이 바뀌었습니다. 공유한 내용을 다시 열어 주세요.')
           const previous = windowsCaptureId ? await existing() : undefined
           if (previous) return previous
           const created = await createNote(ownerId, { title: capture.title.slice(0, 200), body: capture.text }, windowsCaptureId)
-          if (processedImages.length) await attachImages(created.id, processedImages)
+          if (attachments.length) await attachFiles(created.id, attachments)
           if (!isCurrent()) throw new Error('계정이 바뀌었습니다. 공유한 내용을 다시 열어 주세요.')
-          return created
+          return await db.notes.get(created.id) ?? created
         })
       }
       if (!isCurrent()) return null
@@ -399,6 +406,7 @@ export default function App() {
         }
       }
       if (!windowsCaptureId) notify('공유한 내용을 메모에 담았어요.')
+      else if (note.attachments.some(attachment => attachment.mime === 'video/mp4')) notify('화면 녹화를 메모에 저장했어요.')
       else if (note.body.trim()) notify('캡처 이미지와 텍스트를 메모에 저장했어요.')
       else notify('캡처 이미지를 메모에 저장했어요. 읽어낸 텍스트는 없어요.')
       return note
@@ -458,7 +466,7 @@ export default function App() {
       return db.transaction('rw', db.notes, db.images, db.settings, async () => {
         if (!isCurrent()) throw new Error('계정이 바뀌었습니다. 이미지를 다시 추가해 주세요.')
         const note = await createNote(ownerId)
-        await attachImages(note.id, processed)
+        await attachFiles(note.id, processed)
         if (!isCurrent()) throw new Error('계정이 바뀌었습니다. 이미지를 다시 추가해 주세요.')
         return note
       })
@@ -471,10 +479,10 @@ export default function App() {
     <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
       <div className="brand"><div className="brand-mark"><span /><span /></div><div><strong>모아<span>moa</span></strong><small>나의 작은 기록함</small></div><button className="icon-button sidebar-close" aria-label="메뉴 닫기" onClick={() => setSidebarOpen(false)}><X size={20} /></button></div>
       <button className="button primary new-note" onClick={() => void newNote()}><Plus size={19} />새 메모<span className="shortcut">N</span></button>
-      <nav className="main-nav" aria-label="메모 분류">{navigation.map(item => <button key={item.id} className={`nav-item ${filter === item.id && !tag ? 'active' : ''}`} onClick={() => { setFilter(item.id); setTag(null); setSidebarOpen(false) }}><item.icon size={18} /><span>{item.name}</span><small>{currentNotes.filter(note => item.id === 'trash' ? Boolean(note.deletedAt) : !note.deletedAt && (item.id === 'all' || item.id === 'pinned' && note.pinned || item.id === 'images' && note.attachments.length > 0)).length}</small></button>)}</nav>
+      <nav className="main-nav" aria-label="메모 분류">{navigation.map(item => <button key={item.id} className={`nav-item ${filter === item.id && !tag ? 'active' : ''}`} onClick={() => { setFilter(item.id); setTag(null); setSidebarOpen(false) }}><item.icon size={18} /><span>{item.name}</span><small>{currentNotes.filter(note => item.id === 'trash' ? Boolean(note.deletedAt) : !note.deletedAt && (item.id === 'all' || item.id === 'pinned' && note.pinned || item.id === 'images' && hasImage(note))).length}</small></button>)}</nav>
       <div className="tag-section"><div className="section-label">나의 태그 <Hash size={14} /></div>{tags.length ? tags.map(value => <button className={`tag-nav ${tag === value ? 'active' : ''}`} key={value} onClick={() => { setTag(tag === value ? null : value); setFilter('all'); setSidebarOpen(false) }}><span className="tag-dot" />{value}<small>{activeNotes.filter(note => note.tags.includes(value)).length}</small></button>) : <p className="tag-empty">메모에 태그를 달면<br />이곳에 모아드릴게요.</p>}</div>
       <div className="sidebar-bottom">
-        <div className="storage-card"><div><span>이미지 보관함</span><span>{formatBytes(totalImageBytes)}</span></div><div className="storage-track"><span style={{ width: `${Math.max(totalImageBytes ? 2 : 0, Math.min(100, totalImageBytes / 1_000_000_000 * 100))}%` }} /></div><small>이 기기에 보관한 WebP 이미지</small></div>
+        <div className="storage-card"><div><span>첨부 파일 보관함</span><span>{formatBytes(totalImageBytes)}</span></div><div className="storage-track"><span style={{ width: `${Math.max(totalImageBytes ? 2 : 0, Math.min(100, totalImageBytes / 1_000_000_000 * 100))}%` }} /></div><small>이 기기에 보관한 이미지와 영상</small></div>
         <button className="account-button" onClick={() => setSettingsOpen(true)}><div className="avatar">{user?.email?.slice(0, 1).toUpperCase() || <FolderHeart size={19} />}</div><span><strong>{user?.email?.split('@')[0] || '나만의 공간'}</strong><small>{user ? '동기화 계정' : '로컬 전용 모드'}</small></span><Settings2 size={18} /></button>
       </div>
     </aside>
@@ -498,8 +506,8 @@ export default function App() {
         <div className="collection-toolbar"><label className="search-box"><Search size={18} /><input ref={searchRef} type="search" placeholder="제목, 내용, 태그로 찾아보세요" aria-label="메모 검색" value={search} onChange={event => setSearch(event.target.value)} /><kbd>/</kbd></label><div className="view-controls"><select aria-label="메모 정렬" value={sort} onChange={event => setSort(event.target.value as typeof sort)}><option value="updated">최근 수정순</option><option value="created">최근 작성순</option><option value="title">제목순</option></select><span /><button className={`icon-button ${gridView ? 'selected' : ''}`} aria-label="격자로 보기" aria-pressed={gridView} onClick={() => setGridView(true)}><LayoutGrid size={18} /></button><button className={`icon-button ${!gridView ? 'selected' : ''}`} aria-label="목록으로 보기" aria-pressed={!gridView} onClick={() => setGridView(false)}><FileText size={18} /></button></div></div>
         {tag && <div className="active-filter"><span>#{tag}<button aria-label="태그 필터 해제" onClick={() => setTag(null)}><X size={13} /></button></span></div>}
         {visibleNotes.length ? <div className={`notes-grid ${gridView ? '' : 'list-view'}`}>{visibleNotes.map(note => <article className={`note-card ${note.attachments.length ? 'has-image' : ''} ${note.pinned ? 'is-pinned' : ''}`} key={note.id} tabIndex={0} role="button" aria-label={`${noteTitle(note)} 메모 열기`} onClick={() => void openNote(note.id)} onKeyDown={event => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); void openNote(note.id) } }}>
-          {note.attachments[0] && <div className="note-card-image"><ImageView image={note.attachments[0]} />{note.attachments.length > 1 && <span className="image-count"><ImageIcon size={13} />{note.attachments.length}</span>}</div>}
-          <div className="note-card-content"><div className="note-card-top"><span className={`note-kind ${note.attachments.length ? 'image-kind' : ''}`}>{note.attachments.length ? <ImageIcon size={13} /> : <FileText size={13} />}{note.attachments.length ? '이미지 메모' : '텍스트 메모'}</span>{!note.deletedAt && <button className={`card-pin ${note.pinned ? 'pinned' : ''}`} aria-label={note.pinned ? '고정 해제' : '메모 고정'} title={note.pinned ? '고정 해제' : '메모 고정'} onClick={event => { event.stopPropagation(); void updateNote(note.id, { pinned: !note.pinned }).catch(error => notify(error.message)) }}><Pin size={15} /></button>}</div><h2>{noteTitle(note)}</h2>{note.body && <p className="note-excerpt">{excerpt(note.body)}</p>}{note.tags.length > 0 && <div className="note-tags">{note.tags.slice(0, 3).map(value => <button key={value} onClick={event => { event.stopPropagation(); setTag(value); setFilter('all') }}>#{value}</button>)}{note.tags.length > 3 && <span>+{note.tags.length - 3}</span>}</div>}<div className="note-card-footer"><time dateTime={note.updatedAt}>{dateLabel(note.updatedAt)}</time><span title={note.cloudOwnerId ? note.dirty ? '동기화 대기' : '동기화됨' : '이 기기에 저장됨'}>{note.cloudOwnerId ? note.dirty ? <Cloud size={14} /> : <CheckCheck size={14} /> : <Check size={14} />}</span></div></div>
+          {note.attachments[0] && <div className="note-card-image">{note.attachments[0].mime === 'video/mp4' ? <div className="video-card-preview" aria-hidden="true"><Video size={30} /></div> : <ImageView image={note.attachments[0]} />}{note.attachments.length > 1 && <span className="image-count"><ImageIcon size={13} />{note.attachments.length}</span>}</div>}
+          <div className="note-card-content"><div className="note-card-top"><span className={`note-kind ${note.attachments.length ? 'image-kind' : ''}`}>{note.attachments.some(attachment => attachment.mime === 'video/mp4') ? <><Video size={13} />녹화 메모</> : hasImage(note) ? <><ImageIcon size={13} />이미지 메모</> : <><FileText size={13} />텍스트 메모</>}</span>{!note.deletedAt && <button className={`card-pin ${note.pinned ? 'pinned' : ''}`} aria-label={note.pinned ? '고정 해제' : '메모 고정'} title={note.pinned ? '고정 해제' : '메모 고정'} onClick={event => { event.stopPropagation(); void updateNote(note.id, { pinned: !note.pinned }).catch(error => notify(error.message)) }}><Pin size={15} /></button>}</div><h2>{noteTitle(note)}</h2>{note.body && <p className="note-excerpt">{excerpt(note.body)}</p>}{note.tags.length > 0 && <div className="note-tags">{note.tags.slice(0, 3).map(value => <button key={value} onClick={event => { event.stopPropagation(); setTag(value); setFilter('all') }}>#{value}</button>)}{note.tags.length > 3 && <span>+{note.tags.length - 3}</span>}</div>}<div className="note-card-footer"><time dateTime={note.updatedAt}>{dateLabel(note.updatedAt)}</time><span title={note.cloudOwnerId ? note.dirty ? '동기화 대기' : '동기화됨' : '이 기기에 저장됨'}>{note.cloudOwnerId ? note.dirty ? <Cloud size={14} /> : <CheckCheck size={14} /> : <Check size={14} />}</span></div></div>
         </article>)}</div> : <section className="empty-state"><div className="empty-art"><div className="art-paper back" /><div className="art-paper front"><span /><span /><span /><div className="art-dot"><Sparkles size={21} /></div></div><div className="art-spark one" /><div className="art-spark two" /></div><h2>{search || tag ? '아직 일치하는 메모가 없어요' : filter === 'trash' ? '휴지통이 비어 있어요' : filter === 'pinned' ? '오래 간직할 생각을 고정해 보세요' : filter === 'images' ? '첫 번째 이미지를 모아보세요' : '작은 기록이 모이는 곳'}</h2><p>{search || tag ? '다른 단어나 태그로 다시 찾아보세요.' : filter === 'trash' ? '휴지통으로 옮긴 메모는 이곳에서 복원할 수 있어요.' : filter === 'pinned' ? '메모의 핀 아이콘을 누르면 이곳에 모입니다.' : '오늘의 생각 한 줄, 좋아하는 사진 한 장.\n무엇이든 담아두면 필요할 때 다시 만날 수 있어요.'}</p>{!search && !tag && filter !== 'trash' && filter !== 'pinned' && <button className="button primary" onClick={() => void newNote()}><Plus size={18} />첫 메모 남기기</button>}<div className="empty-features"><span><FileText size={15} />텍스트와 Markdown</span><span><ImageIcon size={15} />가벼운 WebP 이미지</span><span><WifiOff size={15} />오프라인에서도</span></div></section>}
         <footer className="workspace-footer"><span>나만의 속도로, 차곡차곡.</span><span>{activeNotes.length}개의 기록<span className="footer-divider">·</span>{pwaReady ? '오프라인 준비됨' : '오프라인 준비 중'}</span></footer>
       </div>

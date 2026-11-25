@@ -138,6 +138,36 @@ test('note CAS, owner isolation, malformed data and image/subscription access', 
       await db.query('delete from storage.objects where name = $1', [imagePath])
       assert.equal((await db.query('select * from storage.objects')).rows.length, 0)
     })
+    await t.test('recording migration preserves private immutable attachments and accepts valid MP4 notes', async () => {
+      await db.exec('reset role')
+      await db.exec(await readFile(new URL('../migrations/202611250001_recordings.sql', import.meta.url), 'utf8'))
+      const bucket = (await db.query("select * from storage.buckets where id = 'note-images'")).rows[0]
+      assert.equal(bucket.public, false)
+      assert.equal(Number(bucket.file_size_limit), 20971520)
+      assert.deepEqual(bucket.allowed_mime_types, ['image/webp', 'video/mp4'])
+
+      await db.exec('set role anon')
+      await assert.rejects(db.query('select public.supports_recording_sync()'), /permission denied/)
+      await asOwner(ownerA)
+      assert.equal((await db.query('select public.supports_recording_sync() as supported')).rows[0].supported, true)
+      const recording = {
+        id: deviceId, name: 'recording.mp4', mime: 'video/mp4', size: 4096,
+        width: 1920, height: 1080, createdAt: content.createdAt,
+      }
+      for (const invalid of [{ width: 2000 }, { size: 20971521 }, { height: 900.5 }, { mime: 'text/html' }]) {
+        await assert.rejects(save({ ...content, attachments: [{ ...recording, ...invalid }] }, versionC, versionB), /Invalid note data/)
+      }
+      const path = ownerA + '/' + recording.id + '.mp4'
+      await db.query('insert into storage.objects values ($1,$2)', ['note-images', path])
+      await assert.rejects(db.query('insert into storage.objects values ($1,$2)', ['note-images', ownerA + '/nested/' + recording.id + '.mp4']), /row-level security/)
+      const saved = await save({ ...content, attachments: [recording] }, versionC, versionB)
+      assert.equal(saved.note.data.attachments[0].mime, 'video/mp4')
+      await asOwner(ownerB)
+      assert.equal((await db.query('select * from storage.objects')).rows.length, 0)
+      await assert.rejects(db.query('insert into storage.objects values ($1,$2)', ['note-images', path]), /row-level security/)
+      await asOwner(ownerA)
+      assert.equal((await db.query('select name from storage.objects')).rows[0].name, path)
+    })
   } finally {
     await db.close()
   }

@@ -83,6 +83,30 @@ describe('portable backups', () => {
     expect(copy.baseVersion).toBeNull()
     expect(copy.cloudOwnerId).toBeNull()
   })
+  it('round-trips a recording backup with a new attachment ID', async () => {
+    const bytes = new Uint8Array(34)
+    const view = new DataView(bytes.buffer)
+    view.setUint32(0, 16)
+    view.setUint32(4, 0x66747970)
+    view.setUint32(16, 9)
+    view.setUint32(20, 0x6d6f6f76)
+    view.setUint32(25, 9)
+    view.setUint32(29, 0x6d646174)
+    const original = { id: crypto.randomUUID(), name: 'recording.mp4', size: bytes.length,
+      width: 640, height: 360, mime: 'video/mp4' as const, createdAt: now }
+    await db.images.put({ ...original, blob: new Blob([bytes], { type: original.mime }) })
+    const source = await createNote(null, { title: '녹화 메모', attachments: [original] })
+
+    const backup = await createBackupBlob()
+    const result = await importBackup(backupFile(new Uint8Array(await backup.arrayBuffer())))
+    expect(result).toEqual({ notes: 1, images: 0, recordings: 1 })
+    const copy = (await db.notes.toArray()).find(note => note.id !== source.id)
+    expect(copy?.attachments[0]).toMatchObject({ name: original.name, mime: original.mime })
+    expect(copy?.attachments[0].id).not.toBe(original.id)
+    const recovered = await db.images.get(copy!.attachments[0].id)
+    expect(new Uint8Array(await recovered!.blob.arrayBuffer())).toEqual(bytes)
+  })
+
   it('validates the entire archive before importing any note', async () => {
     await createNote(null, { title: '유지되는 메모' })
     const invalid = { ...note(), attachments: [{ id: crypto.randomUUID() }] }

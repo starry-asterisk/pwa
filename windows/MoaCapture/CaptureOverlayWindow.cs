@@ -13,7 +13,7 @@ public sealed class CaptureSession
 {
     private readonly IReadOnlyList<MonitorSnapshot> snapshots;
     private readonly List<CaptureOverlayWindow> windows = new();
-    private readonly TaskCompletionSource<CapturedImage?> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource<PhysicalRect?> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private NativeMethods.POINT start;
     private bool dragging, ended;
     public PhysicalRect Selection
@@ -25,7 +25,13 @@ public sealed class CaptureSession
     {
         snapshots = source;
     }
-    public Task<CapturedImage?> RunAsync()
+    public async Task<CapturedImage?> RunAsync()
+    {
+        var rectangle = await SelectAsync();
+        return rectangle is PhysicalRect area ? ScreenCapture.Crop(snapshots, area) : null;
+    }
+
+    public Task<PhysicalRect?> SelectAsync()
     {
         try
         {
@@ -90,17 +96,8 @@ public sealed class CaptureSession
             return;
         ended = true;
         Selection = selection;
-        try
-        {
-            var image = ScreenCapture.Crop(snapshots, selection);
-            CloseWindows();
-            completion.TrySetResult(image);
-        }
-        catch (Exception exception)
-        {
-            CloseWindows();
-            completion.TrySetException(exception);
-        }
+        CloseWindows();
+        completion.TrySetResult(selection);
     }
     public void Cancel()
     {

@@ -57,7 +57,7 @@ try {
   }
   Invoke-Checked $dotnet @('tool', 'run', 'vpk', '--', '--skip-updates', 'pack', '--packId', $config.packageId,
     '--packVersion', $Version, '--packDir', $publish, '--mainExe', $config.mainExe, '--packTitle', $config.title,
-    '--packAuthors', 'starry-asterisk', '--runtime', $config.runtime, '--channel', $config.channel,
+    '--packAuthors', 'starry-asterisk', '--icon', (Get-WorkspacePath $config.icon), '--runtime', $config.runtime, '--channel', $config.channel,
     '--framework', 'vcredist143-x64', '--noPortable', '--outputDir', $package)
 
   $installers = @(Get-ChildItem -LiteralPath $package -Filter '*Setup.exe' -File)

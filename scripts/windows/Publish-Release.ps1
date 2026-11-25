@@ -34,22 +34,22 @@ $tagCommit = & $gh api "repos/$Repository/commits/$tag" --jq '.sha' 2>$null
 if ($LASTEXITCODE -eq 0 -and $tagCommit -ne $TargetCommit) { throw 'The release tag points to a different source revision.' }
 
 $notesPath = Get-WorkspacePath ('.cache/windows/temp/release-notes-' + $manifest.version + '.md')
-$signingNote = if ($manifest.installer.authenticodeSigned) { 'The installer has a trusted Authenticode signature.' }
-  else { 'This initial installer is unsigned. Windows SmartScreen or organization policy may block it. No certificate or security-policy changes are required by this release.' }
+$signingNote = if ($manifest.installer.authenticodeSigned) { '설치 파일에 Authenticode 서명이 있습니다.' }
+  else { '설치 파일은 미서명입니다. Windows SmartScreen 또는 조직 정책에 따라 차단될 수 있습니다.' }
 @"
-Moa Capture $($manifest.version) for Windows x64.
+$($config.title) $($manifest.version) · Windows x64
 
-Download **Moa-Setup.exe** to install. .NET is included; setup may offer Microsoft's Visual C++ runtime if it is missing.
+**Moa-Setup.exe**를 내려받아 설치합니다. .NET이 포함되어 있으며, 필요한 경우 설치 프로그램에서 Microsoft Visual C++ 런타임 설치를 안내합니다.
 
-Installed copies check this repository for updates. Downloaded updates apply on the next launch. Offline startup remains available.
+설치한 앱은 이 저장소에서 새 버전을 확인합니다. 내려받은 업데이트는 앱을 종료하고 다시 실행하면 적용됩니다.
 
 $signingNote
 
-SHA256SUMS.txt contains the installer and update-package hashes. Source revision: $TargetCommit.
+설치 파일과 업데이트 패키지의 해시는 SHA256SUMS.txt에서 확인할 수 있습니다. 소스 커밋은 $TargetCommit 입니다.
 "@ | Set-Content -LiteralPath $notesPath -Encoding utf8
 if (-not $existingJson) {
   Invoke-Checked $gh @('release', 'create', $tag, '--repo', $Repository, '--target', $TargetCommit, '--draft',
-    '--title', "Moa Capture $($manifest.version)", '--notes-file', $notesPath)
+    '--title', "$($config.title) $($manifest.version)", '--notes-file', $notesPath)
 }
 $assets = @(Get-ChildItem -LiteralPath $directory -File | ForEach-Object { $_.FullName })
 Invoke-Checked $gh (@('release', 'upload', $tag, '--repo', $Repository, '--clobber') + $assets)

@@ -1,10 +1,10 @@
 import Dexie, { type Table } from 'dexie'
-import type { Attachment, Note, NoteContent, StoredImage } from '../types'
+import type { Attachment, Note, NoteContent, StoredAttachment } from '../types'
 
 export interface Setting { key: string; value: unknown }
 class MoaDatabase extends Dexie {
   notes!: Table<Note, string>
-  images!: Table<StoredImage, string>
+  images!: Table<StoredAttachment, string>
   settings!: Table<Setting, string>
   constructor() {
     super('moa-notes')
@@ -48,17 +48,17 @@ export async function updateNote(id: string, patch: Partial<NoteContent>): Promi
       version: crypto.randomUUID(), originDeviceId: deviceId, dirty: true })
   })
 }
-export function imageMetadata(image: StoredImage): Attachment {
-  const { blob: _blob, ...metadata } = image
+export function attachmentMetadata(file: StoredAttachment): Attachment {
+  const { blob: _blob, ...metadata } = file
   return metadata
 }
-export async function attachImages(noteId: string, images: StoredImage[]): Promise<void> {
+export async function attachFiles(noteId: string, files: StoredAttachment[]): Promise<void> {
   const deviceId = await getDeviceId()
   await db.transaction('rw', db.notes, db.images, async () => {
     const note = await db.notes.get(noteId)
     if (!note) throw new Error('메모를 찾을 수 없습니다.')
-    await db.images.bulkPut(images)
-    await db.notes.put({ ...note, attachments: [...note.attachments, ...images.map(imageMetadata)],
+    await db.images.bulkPut(files)
+    await db.notes.put({ ...note, attachments: [...note.attachments, ...files.map(attachmentMetadata)],
       updatedAt: new Date().toISOString(), version: crypto.randomUUID(), originDeviceId: deviceId, dirty: true })
   })
 }

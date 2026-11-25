@@ -1,11 +1,11 @@
 import { useEffect, useImperativeHandle, useRef, useState, type Ref } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { Check, ChevronDown, Download, Eye, ImagePlus, LoaderCircle, Pin, RotateCcw, Share2, Trash2, X } from 'lucide-react'
-import { attachImages, db, formatBytes, removeAttachment, updateNote } from '../lib/db'
-import { downloadImageAsPng, optimizeImage } from '../lib/media'
+import { attachFiles, db, formatBytes, removeAttachment, updateNote } from '../lib/db'
+import { downloadBlob, downloadImageAsPng, optimizeImage } from '../lib/media'
 import { DraftSaveQueue } from '../lib/editor-save'
 import type { Attachment, Note } from '../types'
-import ImageView from './ImageView'
+import ImageView, { VideoView } from './ImageView'
 import Markdown from './Markdown'
 import ShareDialog from './ShareDialog'
 
@@ -15,6 +15,7 @@ export default function NoteEditor({ note, onClose, notify, ref }: Props) {
   // App supplies the initial snapshot after waiting for active synchronization.
   // Only metadata follows IndexedDB changes; the user's draft remains local here.
   const currentNote = useLiveQuery(() => db.notes.get(note.id), [note.id], note) || note
+  const stillImages = currentNote.attachments.filter(attachment => attachment.mime === 'image/webp')
   const [title, setTitle] = useState(note.title)
   const [body, setBody] = useState(note.body)
   const [tagText, setTagText] = useState(note.tags.join(', '))
@@ -102,7 +103,7 @@ export default function NoteEditor({ note, onClose, notify, ref }: Props) {
       if (shareTarget) return
       if (event.key === 'Tab') {
         const scope = lightbox ? dialogRef.current?.querySelector('.lightbox') : dialogRef.current
-        const items = Array.from(scope?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]):not([hidden]), textarea:not([disabled]), summary, a[href]') || []).filter(item => item.getClientRects().length > 0)
+        const items = Array.from(scope?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]):not([hidden]), textarea:not([disabled]), summary, a[href], video[controls]') || []).filter(item => item.getClientRects().length > 0)
         const first = items[0], last = items[items.length - 1]
         if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus() }
         else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
@@ -116,7 +117,7 @@ export default function NoteEditor({ note, onClose, notify, ref }: Props) {
   async function addFiles(files: File[]) {
     if (processingRef.current || closingRef.current || currentNote.deletedAt || !files.length) return
     if (files.length > 10) { notify('이미지는 한 번에 10장까지 추가할 수 있어요.'); return }
-    if (currentNote.attachments.length + files.length > 100) { notify('메모 한 개에는 이미지를 100장까지 담을 수 있어요.'); return }
+    if (currentNote.attachments.length + files.length > 100) { notify('메모 한 개에는 첨부 파일을 100개까지 담을 수 있어요.'); return }
     processingRef.current = true
     setProcessing(true)
     try {
@@ -125,7 +126,7 @@ export default function NoteEditor({ note, onClose, notify, ref }: Props) {
       for (const file of files) {
         images.push(await optimizeImage(file, { lossless: lossless || file.type === 'image/png', ...(resize ? { maxDimension: 2560 } : {}) }))
       }
-      await attachImages(note.id, images)
+      await attachFiles(note.id, images)
       notify(`${images.length}장의 이미지를 WebP로 저장했어요.`)
     } catch (error) { notify(error instanceof Error ? error.message : '이미지를 저장하지 못했습니다.') }
     finally { processingRef.current = false; if (mounted.current) setProcessing(false) }
@@ -133,8 +134,9 @@ export default function NoteEditor({ note, onClose, notify, ref }: Props) {
   async function download(image: Attachment) {
     try {
       const stored = await db.images.get(image.id)
-      if (!stored) throw new Error('이미지가 아직 이 기기에 없습니다. 동기화한 뒤 다시 시도해 주세요.')
-      await downloadImageAsPng(stored)
+      if (!stored) throw new Error('첨부 파일이 아직 이 기기에 없습니다. 동기화한 뒤 다시 시도해 주세요.')
+      if (stored.mime === 'video/mp4') downloadBlob(stored.blob, stored.name)
+      else await downloadImageAsPng({ ...stored, mime: stored.mime })
     } catch (error) { notify(error instanceof Error ? error.message : '다운로드하지 못했습니다.') }
   }
   async function trash() {
@@ -157,7 +159,7 @@ export default function NoteEditor({ note, onClose, notify, ref }: Props) {
       <div className="editor-toolbar">
         <div className="saved-state">{saved ? <Check size={15} /> : <LoaderCircle size={15} className="spin" />}<span>{saved ? '이 기기에 저장됨' : '저장 중'}</span></div>
         <div className="toolbar-actions">
-          <button className="icon-button editor-share-button" title="공유" aria-label="메모 공유" disabled={closing || processing || (!title.trim() && !body.trim() && !currentNote.attachments.length)} onClick={() => { void flush().catch(() => {}); setShareTarget({}) }}><Share2 size={18} /></button>
+          <button className="icon-button editor-share-button" title="공유" aria-label="메모 공유" disabled={closing || processing || (!title.trim() && !body.trim() && !stillImages.length)} onClick={() => { void flush().catch(() => {}); setShareTarget({}) }}><Share2 size={18} /></button>
           {!currentNote.deletedAt && <button className={`icon-button ${currentNote.pinned ? 'selected' : ''}`} title={currentNote.pinned ? '고정 해제' : '메모 고정'} aria-label={currentNote.pinned ? '고정 해제' : '메모 고정'} disabled={closing || processing} onClick={() => void updateNote(note.id, { pinned: !currentNote.pinned }).catch(error => notify(error.message))}><Pin size={18} /></button>}
           <button className={`icon-button ${preview ? 'selected' : ''}`} title="미리보기" aria-label="미리보기" aria-pressed={preview} onClick={() => setPreview(!preview)}><Eye size={19} /></button>
           <button className="icon-button" title={currentNote.deletedAt ? '메모 복원' : '휴지통으로 이동'} aria-label={currentNote.deletedAt ? '메모 복원' : '휴지통으로 이동'} disabled={closing || processing} onClick={() => void trash()}>{currentNote.deletedAt ? <RotateCcw size={18} /> : <Trash2 size={18} />}</button>
@@ -170,9 +172,9 @@ export default function NoteEditor({ note, onClose, notify, ref }: Props) {
         <input ref={titleRef} className="editor-title" aria-label="메모 제목" placeholder="어떤 생각을 담아둘까요?" maxLength={200} value={title} disabled={closing || Boolean(currentNote.deletedAt)} onChange={event => { setTitle(event.target.value); changed({ title: event.target.value }) }} />
         <div className="editor-date">{new Intl.DateTimeFormat('ko', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'short' }).format(new Date(note.createdAt))}<span>·</span>나만의 메모</div>
         {preview ? <div className="editor-preview">{body ? <Markdown text={body} /> : <p className="muted">아직 적어둔 내용이 없어요.</p>}</div> : <textarea ref={bodyRef} aria-label="메모 내용" className="editor-body" placeholder={'떠오른 생각, 기억할 문장, 놓치기 아까운 링크.\n무엇이든 편하게 적어두세요.\n\nMarkdown도 사용할 수 있어요.'} value={body} maxLength={500_000} disabled={closing || Boolean(currentNote.deletedAt)} onChange={event => { setBody(event.target.value); changed({ body: event.target.value }) }} />}
-        {currentNote.attachments.length > 0 && <div className="editor-images">{currentNote.attachments.map(image => <div className="editor-image" key={image.id}>
-          <button className="image-open" aria-label={`${image.name} 크게 보기`} onClick={() => setLightbox(image)}><ImageView image={image} /></button>
-          <div className="image-caption"><span title={image.name}>{image.name}<small>{formatBytes(image.size)} · WebP</small></span><button className="icon-button" title="이미지 공유" aria-label={`${image.name} 공유`} disabled={closing || processing} onClick={() => { void flush().catch(() => {}); setShareTarget({ imageId: image.id }) }}><Share2 size={16} /></button><button className="icon-button" title="PNG로 다운로드" aria-label={`${image.name} PNG로 다운로드`} onClick={() => void download(image)}><Download size={16} /></button>{!currentNote.deletedAt && <button className="icon-button" title="이미지 제거" aria-label={`${image.name} 제거`} disabled={closing || processing} onClick={() => void removeAttachment(note.id, image.id).catch(error => notify(error.message))}><X size={16} /></button>}</div>
+        {currentNote.attachments.length > 0 && <div className="editor-images">{currentNote.attachments.map(image => <div className={image.mime === 'video/mp4' ? 'editor-image editor-video' : 'editor-image'} key={image.id}>
+          {image.mime === 'video/mp4' ? <VideoView video={image} /> : <button className="image-open" aria-label={`${image.name} 크게 보기`} onClick={() => setLightbox(image)}><ImageView image={image} /></button>}
+          <div className="image-caption"><span title={image.name}>{image.name}<small>{formatBytes(image.size)} · {image.mime === 'video/mp4' ? 'MP4' : 'WebP'}</small></span>{image.mime === 'image/webp' && <button className="icon-button" title="이미지 공유" aria-label={`${image.name} 공유`} disabled={closing || processing} onClick={() => { void flush().catch(() => {}); setShareTarget({ imageId: image.id }) }}><Share2 size={16} /></button>}<button className="icon-button" title={image.mime === 'video/mp4' ? 'MP4로 다운로드' : 'PNG로 다운로드'} aria-label={`${image.name} ${image.mime === 'video/mp4' ? 'MP4' : 'PNG'}로 다운로드`} onClick={() => void download(image)}><Download size={16} /></button>{!currentNote.deletedAt && <button className="icon-button" title="첨부 파일 제거" aria-label={`${image.name} 제거`} disabled={closing || processing} onClick={() => void removeAttachment(note.id, image.id).catch(error => notify(error.message))}><X size={16} /></button>}</div>
         </div>)}</div>}
         {!currentNote.deletedAt && <>
           <div className={`attachment-drop ${dragging ? 'dragging' : ''}`}>
@@ -186,7 +188,7 @@ export default function NoteEditor({ note, onClose, notify, ref }: Props) {
       <input ref={inputRef} type="file" accept="image/png,image/jpeg,image/webp" multiple hidden aria-label="이미지 파일 선택" onChange={event => { void addFiles(Array.from(event.target.files || [])); event.target.value = '' }} />
       {dragging && <div className="editor-drag-overlay"><ImagePlus size={40} /><strong>여기에 놓으면 메모에 담겨요</strong></div>}
       {lightbox && <div className="lightbox" role="dialog" aria-modal="true" aria-label="이미지 크게 보기" onClick={() => setLightbox(null)}><button className="lightbox-close icon-button" aria-label="이미지 닫기" onClick={() => setLightbox(null)}><X /></button><ImageView image={lightbox} /><button className="button" onClick={event => { event.stopPropagation(); void download(lightbox) }}><Download size={17} />PNG로 다운로드</button></div>}
-      {shareTarget && <ShareDialog title={title} body={body} images={currentNote.attachments} initialImageId={shareTarget.imageId} onClose={() => setShareTarget(null)} notify={notify} />}
+      {shareTarget && <ShareDialog title={title} body={body} images={stillImages} initialImageId={shareTarget.imageId} onClose={() => setShareTarget(null)} notify={notify} />}
     </section>
   </div>
 }

@@ -1,6 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { Attachment, CloudNote, Note, NoteContent, SyncReport } from '../types'
 import { db, getDeviceId } from './db'
+import { MAX_RECORDING_BYTES, validRecordingDimensions } from './recording'
 
 const pageSize = 200
 const bucket = 'note-images'
@@ -15,7 +16,9 @@ function isAttachment(value: unknown): value is Attachment {
   return isRecord(value) && typeof value.id === 'string' && uuidPattern.test(value.id)
     && typeof value.name === 'string' && typeof value.size === 'number' && value.size >= 0
     && typeof value.width === 'number' && value.width > 0 && typeof value.height === 'number' && value.height > 0
-    && value.mime === 'image/webp' && typeof value.createdAt === 'string'
+    && typeof value.createdAt === 'string'
+    && (value.mime === 'image/webp' || (value.mime === 'video/mp4' && Number.isSafeInteger(value.size)
+      && value.size >= 16 && value.size <= MAX_RECORDING_BYTES && validRecordingDimensions(value.width, value.height)))
 }
 
 function readCloudNote(value: unknown, ownerId: string): CloudNote {
@@ -60,34 +63,39 @@ async function assertSession(client: SupabaseClient, ownerId: string): Promise<v
 
 const imageMarker = (ownerId: string, id: string) => `uploaded-image:${ownerId}:${id}`
 
-async function uploadImages(client: SupabaseClient, ownerId: string, attachments: Attachment[]): Promise<void> {
+function attachmentPath(ownerId: string, attachment: Attachment): string {
+  const extension = attachment.mime === 'video/mp4' ? 'mp4' : 'webp'
+  return `${ownerId}/${attachment.id}.${extension}`
+}
+
+async function uploadAttachments(client: SupabaseClient, ownerId: string, attachments: Attachment[]): Promise<void> {
   for (const attachment of attachments) {
-    if (!uuidPattern.test(attachment.id)) throw new Error('이미지 식별자가 올바르지 않습니다.')
+    if (!uuidPattern.test(attachment.id)) throw new Error('첨부 파일 식별자가 올바르지 않습니다.')
     if ((await db.settings.get(imageMarker(ownerId, attachment.id)))?.value === true) continue
-    const image = await db.images.get(attachment.id)
-    if (!image) throw new Error(`이미지 원본을 찾을 수 없습니다: ${attachment.name}`)
+    const stored = await db.images.get(attachment.id)
+    if (!stored) throw new Error(`첨부 원본을 찾을 수 없습니다: ${attachment.name}`)
     await assertSession(client, ownerId)
-    const { error } = await client.storage.from(bucket).upload(`${ownerId}/${attachment.id}.webp`, image.blob, {
-      contentType: 'image/webp', cacheControl: '31536000', upsert: false,
+    const { error } = await client.storage.from(bucket).upload(attachmentPath(ownerId, attachment), stored.blob, {
+      contentType: attachment.mime, cacheControl: '31536000', upsert: false,
     })
     if (error) {
       const storageError = error as { statusCode?: string; status?: number; message: string }
       const status = String(storageError.statusCode ?? storageError.status ?? '')
       // IDs are immutable. A previous interrupted sync may already have uploaded this object.
       if (status !== '409' && !(status === '400' && /already exists|duplicate/i.test(storageError.message))) {
-        throw new Error(`이미지를 업로드하지 못했습니다: ${error.message}`)
+        throw new Error(`첨부 파일을 업로드하지 못했습니다: ${error.message}`)
       }
     }
     await db.settings.put({ key: imageMarker(ownerId, attachment.id), value: true })
   }
 }
 
-async function downloadImages(client: SupabaseClient, ownerId: string, attachments: Attachment[]): Promise<void> {
+async function downloadAttachments(client: SupabaseClient, ownerId: string, attachments: Attachment[]): Promise<void> {
   for (const attachment of attachments) {
     if (await db.images.get(attachment.id)) continue
     await assertSession(client, ownerId)
-    const { data, error } = await client.storage.from(bucket).download(`${ownerId}/${attachment.id}.webp`)
-    if (error || !data) throw new Error(`이미지를 내려받지 못했습니다: ${attachment.name}${error ? ` (${error.message})` : ''}`)
+    const { data, error } = await client.storage.from(bucket).download(attachmentPath(ownerId, attachment))
+    if (error || !data) throw new Error(`첨부 파일을 내려받지 못했습니다: ${attachment.name}${error ? ` (${error.message})` : ''}`)
     await assertSession(client, ownerId)
     await db.images.put({ ...attachment, blob: data })
     await db.settings.put({ key: imageMarker(ownerId, attachment.id), value: true })
@@ -113,8 +121,21 @@ async function runSync(client: SupabaseClient, ownerId: string): Promise<SyncRep
   const deviceId = await getDeviceId()
   const report: SyncReport = { uploaded: 0, downloaded: 0, conflicts: 0 }
 
+  const deferredRecordings = new Set<string>()
+  let supportsRecordings: boolean | undefined
+  async function recordingsEnabled(): Promise<boolean> {
+    if (supportsRecordings !== undefined) return supportsRecordings
+    await assertSession(client, ownerId)
+    const { data, error } = await client.rpc('supports_recording_sync')
+    // A project without the recording migration leaves the complete note queued locally.
+    if (error && error.code !== 'PGRST202') throw new Error('녹화 동기화 설정을 확인하지 못했습니다.')
+    await assertSession(client, ownerId)
+    supportsRecordings = data === true
+    return supportsRecordings
+  }
+
   async function preserveConflict(snapshot: Note, remote: CloudNote): Promise<Note | null> {
-    await downloadImages(client, ownerId, remote.data.attachments)
+    await downloadAttachments(client, ownerId, remote.data.attachments)
     await assertSession(client, ownerId)
     const now = new Date().toISOString()
     const copyId = crypto.randomUUID()
@@ -138,7 +159,11 @@ async function runSync(client: SupabaseClient, ownerId: string): Promise<SyncRep
   async function uploadNote(id: string, allowConflict = true): Promise<void> {
     const snapshot = await db.notes.get(id)
     if (!snapshot?.dirty || snapshot.cloudOwnerId !== ownerId) return
-    await uploadImages(client, ownerId, snapshot.attachments)
+    if (snapshot.attachments.some(attachment => attachment.mime === 'video/mp4') && !await recordingsEnabled()) {
+      deferredRecordings.add(id)
+      return
+    }
+    await uploadAttachments(client, ownerId, snapshot.attachments)
     await assertSession(client, ownerId)
     const { data, error } = await client.rpc('save_note', {
       p_id: snapshot.id, p_data: noteContent(snapshot), p_version: snapshot.version,
@@ -183,6 +208,7 @@ async function runSync(client: SupabaseClient, ownerId: string): Promise<SyncRep
     if (!Array.isArray(data)) throw new Error('클라우드 메모 목록을 확인하지 못했습니다.')
     for (const value of data) {
       const remote = readCloudNote(value, ownerId)
+      if (deferredRecordings.has(remote.id)) continue
       const snapshot = await db.notes.get(remote.id)
       if (snapshot && snapshot.cloudOwnerId !== ownerId) {
         throw new Error('다른 계정의 로컬 메모와 식별자가 겹칩니다. 데이터를 내보낸 뒤 계정을 확인해 주세요.')
@@ -207,7 +233,7 @@ async function runSync(client: SupabaseClient, ownerId: string): Promise<SyncRep
         continue
       }
       if (snapshot?.version === remote.version) continue
-      await downloadImages(client, ownerId, remote.data.attachments)
+      await downloadAttachments(client, ownerId, remote.data.attachments)
       await assertSession(client, ownerId)
       const applied = await db.transaction('rw', db.notes, async () => {
         const current = await db.notes.get(remote.id)
@@ -219,6 +245,7 @@ async function runSync(client: SupabaseClient, ownerId: string): Promise<SyncRep
     }
     if (data.length < pageSize) break
   }
+  if (deferredRecordings.size) report.pendingRecordings = deferredRecordings.size
   return report
 }
 

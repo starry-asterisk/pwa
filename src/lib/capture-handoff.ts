@@ -1,5 +1,6 @@
 import { unzipSync } from 'fflate'
 import { readImageHeader } from './media'
+import { isMp4, MAX_RECORDING_BYTES, validRecordingDimensions } from './recording'
 import type { SharedCapture } from './share-inbox'
 
 export const CAPTURE_MIME = 'application/vnd.moa.capture+zip'
@@ -9,6 +10,9 @@ export const MAX_CAPTURE_FILE_BYTES = 27 * 1024 * 1024
 export const MAX_CAPTURE_TEXT_CHARACTERS = 100_000
 const MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 const MAX_CAPTURE_IMAGE_BYTES = 25 * 1024 * 1024
+const entryLimits = new Map([
+  ['manifest.json', MAX_MANIFEST_BYTES], ['image.png', MAX_CAPTURE_IMAGE_BYTES], ['video.mp4', MAX_RECORDING_BYTES],
+])
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?(?:Z|[+-]\d{2}:\d{2})$/
 
@@ -31,9 +35,9 @@ function decodeCaptureBytes(bytes: Uint8Array): SharedCapture {
   let files: Record<string, Uint8Array>
   try {
     files = unzipSync(bytes, { filter(entry) {
-      if (!['manifest.json', 'image.png'].includes(entry.name) || seen.has(entry.name)) fail('캡처 파일에 허용되지 않거나 중복된 항목이 있습니다.')
+      const limit = entryLimits.get(entry.name)
+      if (!limit || seen.has(entry.name)) fail('캡처 파일에 허용되지 않거나 중복된 항목이 있습니다.')
       seen.add(entry.name)
-      const limit = entry.name === 'manifest.json' ? MAX_MANIFEST_BYTES : MAX_CAPTURE_IMAGE_BYTES
       if (!Number.isSafeInteger(entry.originalSize) || entry.originalSize <= 0 || entry.originalSize > limit) fail('캡처 파일 안의 데이터가 너무 큽니다.')
       total += entry.originalSize
       if (total > MAX_CAPTURE_FILE_BYTES) fail('캡처 파일의 전체 크기가 너무 큽니다.')
@@ -44,24 +48,41 @@ function decodeCaptureBytes(bytes: Uint8Array): SharedCapture {
     fail('모아 캡처 파일을 읽을 수 없습니다. 파일이 손상되지 않았는지 확인해 주세요.')
   }
   const manifest = files['manifest.json']
-  const png = files['image.png']
-  if (Object.keys(files).length !== 2 || !manifest || !png || manifest.length > MAX_MANIFEST_BYTES || png.length > MAX_CAPTURE_IMAGE_BYTES) fail('캡처 파일의 메모 또는 이미지가 없습니다.')
+  if (!manifest || manifest.length > MAX_MANIFEST_BYTES) fail('캡처 파일의 메모 정보가 없습니다.')
   let raw: unknown
   try { raw = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(manifest)) } catch { fail('캡처 파일의 메모 정보를 읽을 수 없습니다.') }
-  if (!record(raw) || !exactKeys(raw, ['format', 'schemaVersion', 'id', 'createdAt', 'title', 'text', 'image'])
-    || raw.format !== 'moa-capture' || raw.schemaVersion !== 1 || typeof raw.id !== 'string' || !UUID_V4.test(raw.id)
+  if (!record(raw) || raw.format !== 'moa-capture' || typeof raw.id !== 'string' || !UUID_V4.test(raw.id)
     || typeof raw.createdAt !== 'string' || !ISO_DATE.test(raw.createdAt) || !Number.isFinite(Date.parse(raw.createdAt))
-    || typeof raw.title !== 'string' || raw.title.length > 200 || typeof raw.text !== 'string' || raw.text.length > MAX_CAPTURE_TEXT_CHARACTERS
-    || !record(raw.image) || !exactKeys(raw.image, ['path', 'name', 'mime', 'size', 'width', 'height'])) fail('캡처 파일의 형식이나 메모 정보가 올바르지 않습니다.')
+    || typeof raw.title !== 'string' || raw.title.length > 200 || typeof raw.text !== 'string' || raw.text.length > MAX_CAPTURE_TEXT_CHARACTERS) {
+    fail('캡처 파일의 형식이나 메모 정보가 올바르지 않습니다.')
+  }
+  const capture = { id: raw.id.toLowerCase(), title: raw.title, text: raw.text, createdAt: raw.createdAt }
+  const lastModified = Date.parse(raw.createdAt)
+  const fields = ['format', 'schemaVersion', 'id', 'createdAt', 'title', 'text']
+  const mediaFields = ['path', 'name', 'mime', 'size', 'width', 'height']
+  if (raw.schemaVersion === 2) {
+    const video = raw.video
+    const mp4 = files['video.mp4']
+    if (Object.keys(files).length !== 2 || !exactKeys(raw, [...fields, 'video']) || !mp4 || !record(video) || !exactKeys(video, mediaFields)
+      || video.path !== 'video.mp4' || video.name !== 'recording.mp4' || video.mime !== 'video/mp4' || video.size !== mp4.byteLength
+      || typeof video.width !== 'number' || typeof video.height !== 'number'
+      || !validRecordingDimensions(video.width, video.height) || !isMp4(mp4)) fail('화면 녹화 파일의 형식이나 해상도가 올바르지 않습니다.')
+    return {
+      ...capture, recording: { width: video.width, height: video.height },
+      files: [new File([new Uint8Array(mp4)], 'recording.mp4', { type: 'video/mp4', lastModified })],
+    }
+  }
   const image = raw.image
-  if (image.path !== 'image.png' || image.name !== 'capture.png' || image.mime !== 'image/png'
-    || !Number.isSafeInteger(image.size) || image.size !== png.length
+  const png = files['image.png']
+  if (!png) fail('캡처 파일의 이미지가 없습니다.')
+  if (Object.keys(files).length !== 2 || raw.schemaVersion !== 1 || !exactKeys(raw, [...fields, 'image']) || !record(image) || !exactKeys(image, mediaFields)
+    || image.path !== 'image.png' || image.name !== 'capture.png' || image.mime !== 'image/png'
+    || image.size !== png.byteLength || png.byteLength > MAX_CAPTURE_IMAGE_BYTES
     || !Number.isSafeInteger(image.width) || !Number.isSafeInteger(image.height)) fail('캡처 이미지의 정보가 올바르지 않습니다.')
   const header = readImageHeader(png)
   if (header.format !== 'png' || header.width !== image.width || header.height !== image.height) fail('캡처 이미지의 형식이나 해상도가 일치하지 않습니다.')
   return {
-    id: raw.id.toLowerCase(), title: raw.title, text: raw.text, createdAt: raw.createdAt,
-    files: [new File([new Uint8Array(png)], 'capture.png', { type: 'image/png', lastModified: Date.parse(raw.createdAt) })],
+    ...capture, files: [new File([new Uint8Array(png)], 'capture.png', { type: 'image/png', lastModified })],
   }
 }
 
