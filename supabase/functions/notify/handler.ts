@@ -11,6 +11,69 @@ interface DeviceSubscription {
   subscription: unknown;
 }
 
+interface NotePreviewData {
+  deletedAt?: string | null;
+  title?: unknown;
+  body?: unknown;
+  attachments?: unknown;
+}
+
+const previewSegments = new Intl.Segmenter("ko", { granularity: "grapheme" });
+const previewEncoder = new TextEncoder();
+
+function plainLine(value: string): string {
+  return value
+    .replace(/[\p{Cc}\u202A-\u202E\u2066-\u2069]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function clipPreview(value: string, limit: number): string {
+  let result = "";
+  let count = 0;
+  let bytes = 0;
+  for (const { segment } of previewSegments.segment(value)) {
+    bytes += previewEncoder.encode(segment).length;
+    if (count === limit || bytes > limit * 4) {
+      return result ? result.trimEnd() + "…" : "";
+    }
+    result += segment;
+    count++;
+  }
+  return result;
+}
+
+function notificationPreview(note: NotePreviewData) {
+  const title = typeof note.title === "string" ? plainLine(note.title) : "";
+  const body = typeof note.body === "string"
+    ? plainLine(
+      note.body.trimStart().slice(0, 3_000)
+        .replace(/\r\n?/g, "\n")
+        .replace(/^[ \t]*(?:\x60{3,}|~{3,})[^\n]*$/gm, "")
+        .replace(/^[ \t]*(?:#{1,6}|>+|[-*+]|\d+[.)])[ \t]+/gm, "")
+        .replace(/!?\[([^\]\n]*)\]\([^\n)]*\)/g, "$1")
+        .replace(/(\*\*|__|~~|\x60)([^\n]+?)\1/g, "$2"),
+    )
+    : "";
+  let photos = 0;
+  let recordings = 0;
+  if (Array.isArray(note.attachments)) {
+    for (const attachment of note.attachments) {
+      if (attachment?.mime === "image/webp") photos++;
+      if (attachment?.mime === "video/mp4") recordings++;
+    }
+  }
+  const parts = [
+    photos ? "📷 사진 " + photos + "장" : "",
+    recordings ? "🎬 녹화 " + recordings + "개" : "",
+    clipPreview(body, photos || recordings ? 72 : 110),
+  ];
+  return {
+    title: clipPreview(title, 46) || "새 메모",
+    body: parts.filter(Boolean).join(" · ") || "다른 기기에 새 메모를 저장했어요.",
+  };
+}
+
 const MAX_BODY_BYTES = 1_600_000;
 const response = (status: number, value: Record<string, unknown>) =>
   new Response(JSON.stringify(value), {
@@ -121,10 +184,13 @@ export function createNotifyHandler(
       const notes = await noteResponse.json() as {
         id: string;
         owner_id: string;
-        data: { deletedAt?: string | null };
+        data: NotePreviewData;
       }[];
       const note = notes[0];
-      if (!note || note.owner_id !== event.owner_id || note.data.deletedAt) {
+      if (
+        !note || note.id !== event.id || note.owner_id !== event.owner_id ||
+        !note.data || note.data.deletedAt
+      ) {
         return response(200, { sent: 0, skipped: true });
       }
 
@@ -148,8 +214,9 @@ export function createNotifyHandler(
       let removed = 0;
       let failed = 0;
       const message = JSON.stringify({
-        title: "새 메모가 도착했습니다",
-        body: "다른 기기에 저장한 메모를 확인하세요.",
+        ...notificationPreview(note.data),
+        ownerId: note.owner_id,
+        projectUrl: new URL(supabaseUrl).origin,
         tag: `note-${event.id}`,
         noteId: event.id,
         url: destination.href,

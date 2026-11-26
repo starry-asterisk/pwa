@@ -99,7 +99,7 @@ export default function LoginPushPrompt({ client, projectUrl, ownerId, sessionId
     onCancel={event => { event.preventDefault(); if (!operation.current) setOffer(null) }}>
     <div className="login-push-icon" aria-hidden="true">{registered ? <Check size={24} /> : <Bell size={24} />}</div>
     <h2 id="login-push-title">{registered ? '새 메모 알림이 켜졌어요' : '새 메모 알림을 받을까요?'}</h2>
-    <p id="login-push-description">{registered ? '이 기기의 서버 등록을 확인했어요.' : '다른 기기에서 새 메모를 저장하면 이 기기로 알려드려요.'}</p>
+    <p id="login-push-description">{registered ? '이 기기의 서버 등록을 확인했어요.' : '다른 기기에서 새 메모를 저장하면 제목과 내용 일부를 이 기기에 알려드려요.'}</p>
     {registered && <span className="settings-status connected" role="status">서버 등록 완료</span>}
     {stage && <p className="login-push-progress" role="status">{stageLabels[stage]}</p>}
     {error && <p className="login-push-error" role="alert">{error}</p>}

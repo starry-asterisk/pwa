@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { db, createNote } from './lib/db'
 import { readCapture, storeCapture } from './lib/share-inbox'
 import { readCachedOwner, writeCachedOwner } from './lib/offline-owner'
+import { getPushPreviewOwner } from './lib/push-preview-owner'
 import App from './App'
 
 const mocks = vi.hoisted(() => {
@@ -137,6 +138,25 @@ describe('login notification offer', () => {
     expect(prompt()?.textContent).not.toContain('서버 등록 완료')
     await act(async () => { registration.resolve() })
     expect(prompt()?.textContent).toContain('서버 등록 완료')
+  })
+
+  it('switches preview eligibility with auth changes and removes it on logout', async () => {
+    const projectUrl = 'https://test.supabase.co'
+    await mount()
+    await vi.waitFor(async () => {
+      expect(await getPushPreviewOwner()).toEqual({ projectUrl, ownerId: mocks.state.owner.id })
+    })
+
+    const other = { id: 'f485e060-eef0-4f14-9742-57d0891a7caf', email: 'other@example.test' }
+    await act(async () => { mocks.state.authListener?.('SIGNED_IN', { user: other }) })
+    await vi.waitFor(async () => {
+      expect(await getPushPreviewOwner()).toEqual({ projectUrl, ownerId: other.id })
+    })
+
+    await click('[aria-label="설정 열기"]')
+    await act(async () => { [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(button => button.textContent === '동기화')!.click() })
+    await act(async () => { [...container.querySelectorAll<HTMLButtonElement>('.settings-panel button')].find(button => button.textContent === '로그아웃')!.click() })
+    await vi.waitFor(async () => { expect(await getPushPreviewOwner()).toBeNull() })
   })
 
   it('skips the offer when the browser subscription matches the server registration', async () => {

@@ -4,6 +4,8 @@ import { NavigationRoute, registerRoute } from 'workbox-routing'
 import { clientsClaim } from 'workbox-core'
 import { storeCapture } from './lib/share-inbox'
 import { ShareValidationError, validateSharedForm } from './lib/share-validation'
+import { describeNotePush, readPushPreviewOwner } from './lib/push-message'
+import { getPushPreviewOwner } from './lib/push-preview-owner'
 
 declare let self: ServiceWorkerGlobalScope & { __WB_MANIFEST: Array<{url: string; revision: string | null}> }
 precacheAndRoute(self.__WB_MANIFEST)
@@ -27,16 +29,19 @@ self.addEventListener('fetch', event => {
     : new Response('공유한 내용을 저장하지 못했습니다. 앱을 열어 다시 시도하세요.', { status: 500 })))
 })
 self.addEventListener('push', event => {
-  let data: Record<string, unknown> = {}
-  try { data = event.data?.json() || {} } catch { /* A generic notification is still useful. */ }
-  const noteId = typeof data.noteId === 'string' && /^[0-9a-f-]{36}$/i.test(data.noteId) ? data.noteId : undefined
-  event.waitUntil(self.registration.showNotification('새 메모가 도착했습니다', {
-    body: '다른 기기에 저장한 메모를 확인하세요.',
-    icon: `${import.meta.env.BASE_URL}icon-192.png`,
-    badge: `${import.meta.env.BASE_URL}icon-192.png`,
-    tag: noteId ? `note-${noteId}` : 'moa-new-note',
-    data: { noteId },
-  }))
+  let data: unknown
+  try { data = event.data?.json() } catch { /* A generic notification is still useful. */ }
+  event.waitUntil((async () => {
+    const owner = readPushPreviewOwner(data) ? await getPushPreviewOwner().catch(() => null) : null
+    const { noteId, title, body } = describeNotePush(data, owner)
+    await self.registration.showNotification(title, {
+      body,
+      icon: `${import.meta.env.BASE_URL}icon-192.png`,
+      badge: `${import.meta.env.BASE_URL}icon-192.png`,
+      tag: noteId ? `note-${noteId}` : 'moa-new-note',
+      data: { noteId },
+    })
+  })())
 })
 self.addEventListener('notificationclick', event => {
   event.notification.close()

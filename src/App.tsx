@@ -12,6 +12,7 @@ import { storeRecording } from './lib/recording'
 import { deleteCapture, readCapture, type SharedCapture } from './lib/share-inbox'
 import { CaptureFileOpenError, listenForCaptureFiles, receiveCaptureFile } from './lib/capture-handoff'
 import { loginSessionId } from './lib/login-session'
+import { clearPushPreviewOwner, updatePushPreviewOwner } from './lib/push-preview-owner'
 import { useNoteBackNavigation } from './lib/useNoteBackNavigation'
 import { useNoteLongPress } from './lib/useNoteLongPress'
 import type { CloudConfig, Note, NoteFilter, StoredAttachment, StoredImage } from './types'
@@ -185,6 +186,9 @@ export default function App() {
     let authVersion = 0
     let explicitlySignedOut = false
     let cachedOwner: LocalOwner | null = null
+    const rememberPushPreviewOwner = (ownerId: string | null) => {
+      void updatePushPreviewOwner(config, defaultConfig, ownerId).catch(() => {})
+    }
     const presentSession = (session: Session | null, signedOut = false) => {
       if (!active) return
       authReadyRef.current = true; setAuthReady(true)
@@ -196,6 +200,7 @@ export default function App() {
         setPushLogin(null)
         applyUser(null)
         void clearCachedOwner(config.url).catch(() => {})
+        rememberPushPreviewOwner(null)
         return
       }
       if (signingOutRef.current) return
@@ -210,9 +215,11 @@ export default function App() {
         cachedOwner = { id: actualUser.id, ...(actualUser.email ? { email: actualUser.email } : {}) }
         applyUser(cachedOwner)
         void writeCachedOwner(config.url, cachedOwner).catch(() => {})
+        rememberPushPreviewOwner(actualUser.id)
       } else {
         setPushLogin(null)
         applyUser(!navigator.onLine ? cachedOwner : null)
+        if (navigator.onLine) rememberPushPreviewOwner(null)
       }
     }
     const checkSession = async () => {
@@ -518,7 +525,11 @@ export default function App() {
   }, [user, openPushedNote])
   async function saveConfig(next: CloudConfig | null) {
     const validated = next ? validateCloudConfig(next) : emptyConfig
-    await setSetting('cloud-config', validated)
+    await db.transaction('rw', db.settings, async () => {
+      const previous = await getSetting('cloud-config', defaultConfig)
+      if (previous.url !== validated.url || previous.anonKey !== validated.anonKey) await clearPushPreviewOwner()
+      await setSetting('cloud-config', validated)
+    })
     setConfig(validated)
     setSyncError('')
     notify(next ? '연결 설정을 저장했어요.' : '로컬 전용 모드로 전환했어요.')
@@ -538,7 +549,7 @@ export default function App() {
     setAuthenticated(false)
     applyUser(null)
     try {
-      await clearCachedOwner(config.url)
+      await Promise.all([clearCachedOwner(config.url), updatePushPreviewOwner(config, defaultConfig, null)])
       if (client) await signOutCloud(client)
     } finally { signingOutRef.current = false }
   }

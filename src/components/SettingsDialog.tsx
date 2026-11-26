@@ -375,7 +375,7 @@ export default function SettingsDialog({ config, client, user, authenticated, on
           {tab === 'notifications' && <>
             <section className="settings-section">
               <div className="settings-section-heading"><h3>다른 기기의 새 메모 알림</h3><span className={`settings-status${pushRegistered ? ' connected' : ''}`} role="status">{pushStatusLabel}</span></div>
-              <p className="settings-help">다른 기기에서 새 메모를 만들면 이 기기로 알려드립니다.</p>
+              <p className="settings-help">새 메모 알림에 제목, 본문 일부, 첨부 개수를 표시합니다. 잠금 화면에 표시되는 범위는 기기의 알림 설정을 따릅니다.</p>
               <div className="settings-callout"><Bell size={18} /><span>{permissionLabel}</span></div>
               <p className="settings-help">{localPush ? '이 브라우저에 알림 구독이 있습니다.' : '이 브라우저에 알림 구독이 없습니다.'} 서버 등록이 완료되어야 새 메모 알림을 받을 수 있습니다.</p>
               {(!authenticated || !online) && <p className="settings-help">온라인에서 로그인을 확인한 뒤 서버 등록을 확인하고 알림을 켤 수 있습니다.</p>}
