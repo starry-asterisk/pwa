@@ -168,6 +168,120 @@ test('note CAS, owner isolation, malformed data and image/subscription access', 
       await asOwner(ownerA)
       assert.equal((await db.query('select name from storage.objects')).rows[0].name, path)
     })
+
+    await t.test('permanent deletion keeps no memo content and cannot cross account boundaries', async () => {
+      await db.exec('reset role')
+      await db.exec('create publication supabase_realtime for table public.notes')
+      await db.exec(await readFile(new URL('../migrations/202611260001_permanent_delete.sql', import.meta.url), 'utf8'))
+      assert.equal((await db.query("select count(*)::int as count from pg_publication_tables where pubname = 'supabase_realtime' and tablename = 'note_tombstones'")).rows[0].count, 1)
+
+      await db.exec('set role anon')
+      await assert.rejects(db.query('select * from public.note_tombstones'), /permission denied/)
+      await assert.rejects(db.query('select * from public.note_attachment_gc'), /permission denied/)
+      await assert.rejects(db.query('select * from public.pending_note_attachment_gc'), /permission denied/)
+      await assert.rejects(db.query('select public.purge_notes($1::uuid[])', [[noteId]]), /permission denied/)
+      await assert.rejects(db.query('select public.ack_note_attachment_gc($1::text[])', [[]]), /permission denied/)
+
+      const sharedRecording = { id: deviceId, name: 'clip.mp4', mime: 'video/mp4', size: 4096,
+        width: 1920, height: 1080, createdAt: content.createdAt }
+      const copyId = '20000000-0000-4000-8000-000000000002'
+      const orphanId = '20000000-0000-4000-8000-000000000003'
+      const lateId = '20000000-0000-4000-8000-000000000004'
+      const unusedId = '20000000-0000-4000-8000-000000000005'
+      const offlineNoteId = '20000000-0000-4000-8000-000000000006'
+      const inFlightId = '20000000-0000-4000-8000-000000000007'
+      const sharedName = ownerA + '/' + sharedRecording.id + '.mp4'
+      const orphanName = ownerA + '/' + orphanId + '.webp'
+      const lateName = ownerA + '/' + lateId + '.webp'
+      const unusedName = ownerA + '/' + unusedId + '.webp'
+      const inFlightName = ownerA + '/' + inFlightId + '.webp'
+      const otherOwnerName = ownerB + '/' + sharedRecording.id + '.mp4'
+      const image = (id) => ({ id, name: 'image.webp', mime: 'image/webp', size: 128,
+        width: 20, height: 20, createdAt: content.createdAt })
+      const upload = (name) => db.query("insert into storage.objects values ('note-images', $1)", [name])
+      // The fixture represents only Storage metadata. The app uses the Storage API.
+      const remove = (name) => db.query('delete from storage.objects where name = $1 returning name', [name])
+      const purge = async (ids, names = []) => (await db.query(
+        'select public.purge_notes($1::uuid[], $2::text[]) as result', [ids, names])).rows[0].result
+      const ack = async (names) => (await db.query(
+        'select public.ack_note_attachment_gc($1::text[]) as result', [names])).rows[0].result
+      const pending = async () => (await db.query('select object_name from public.pending_note_attachment_gc order by object_name')).rows.map(row => row.object_name)
+
+      await asOwner(ownerB)
+      await upload(otherOwnerName)
+      await asOwner(ownerA)
+      await assert.rejects(purge([]), /Invalid note purge batch/)
+      await assert.rejects(purge([null]), /Invalid note purge batch/)
+      await assert.rejects(db.query('delete from public.notes'), /permission denied/)
+      await assert.rejects(db.query('delete from public.note_tombstones'), /permission denied/)
+      await assert.rejects(db.query('update public.note_attachment_gc set cleaned_at = now()'), /permission denied/)
+
+      const copy = await save({ ...content, deletedAt: content.updatedAt, attachments: [sharedRecording] }, versionA, null, copyId)
+      assert.equal(copy.status, 'saved')
+      await upload(orphanName)
+      assert.deepEqual(await purge([noteId, noteId, offlineNoteId], [otherOwnerName, sharedName, orphanName, inFlightName]), [
+        { id: noteId, status: 'purged' },
+        { id: offlineNoteId, status: 'purged' },
+      ])
+      assert.deepEqual((await db.query('select id from public.notes')).rows, [{ id: copyId }])
+      const tombstones = (await db.query('select * from public.note_tombstones order by id')).rows
+      assert.deepEqual(tombstones.map(row => row.id), [noteId, offlineNoteId])
+      assert.deepEqual(Object.keys(tombstones[0]).sort(), ['deleted_at', 'id', 'owner_id'])
+      assert.deepEqual(await purge([noteId]), [{ id: noteId, status: 'purged' }])
+      assert.deepEqual((await db.query('select * from public.note_tombstones order by id')).rows, tombstones)
+      assert.deepEqual(await pending(), [orphanName, inFlightName])
+      assert.deepEqual((await remove(sharedName)).rows, [])
+      assert.equal(await ack([orphanName, inFlightName]), 1)
+      assert.deepEqual(await pending(), [orphanName])
+
+      await asOwner(ownerB)
+      assert.deepEqual((await db.query('select id from public.notes')).rows, [{ id: noteId }])
+      assert.deepEqual((await db.query('select * from public.note_tombstones')).rows, [])
+      assert.deepEqual(await pending(), [])
+      assert.equal(await ack([orphanName]), 0)
+      assert.deepEqual((await remove(orphanName)).rows, [])
+      assert.deepEqual((await db.query('select name from storage.objects')).rows, [{ name: otherOwnerName }])
+
+      await asOwner(ownerA)
+      await upload(lateName)
+      assert.deepEqual(await save({ ...content, attachments: [sharedRecording, image(lateId)] }, versionB, versionC), { status: 'purged' })
+      assert.deepEqual(await save(content, versionB, null, offlineNoteId), { status: 'purged' })
+      assert.deepEqual(await pending(), [orphanName, lateName].sort())
+      assert.equal((await save({ ...content, body: 'surviving copy' }, versionB, versionC, copyId)).status, 'conflict')
+      assert.deepEqual(await purge([copyId]), [{ id: copyId, status: 'purged' }])
+      assert.deepEqual(await pending(), [orphanName, lateName, sharedName].sort())
+
+      await assert.rejects(upload(sharedName), /row-level security/)
+      assert.deepEqual(await save({ ...content, attachments: [sharedRecording, image(orphanId)] }, versionA, null, unusedId), {
+        status: 'attachment_purged',
+        object_names: [orphanName, sharedName].sort(),
+      })
+      for (const name of [sharedName, orphanName, lateName]) {
+        assert.deepEqual((await remove(name)).rows, [{ name }])
+      }
+      assert.equal(await ack([sharedName, orphanName, lateName, otherOwnerName]), 3)
+      assert.equal(await ack([sharedName]), 0)
+      assert.deepEqual(await pending(), [])
+      await assert.rejects(upload(sharedName), /row-level security/)
+      await assert.rejects(upload(lateName), /row-level security/)
+      assert.deepEqual(await save({ ...content, attachments: [image(lateId)] }, versionA, null, unusedId), {
+        status: 'attachment_purged', object_names: [lateName],
+      })
+      await upload(unusedName)
+      assert.equal((await save({ ...content, attachments: [image(unusedId)] }, versionA, null, unusedId)).status, 'saved')
+
+      await assert.rejects(upload(inFlightName), /row-level security/)
+      // Simulate Storage finalizing an upload authorized before retirement.
+      await db.exec('reset role')
+      await upload(inFlightName)
+      await asOwner(ownerB)
+      assert.deepEqual(await pending(), [])
+      await asOwner(ownerA)
+      assert.deepEqual(await pending(), [inFlightName])
+      assert.deepEqual((await remove(inFlightName)).rows, [{ name: inFlightName }])
+      assert.equal(await ack([inFlightName]), 0)
+      assert.deepEqual(await pending(), [])
+    })
   } finally {
     await db.close()
   }

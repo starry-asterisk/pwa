@@ -133,8 +133,17 @@ export async function removePushSubscription(client: SupabaseClient, deviceId: s
 /** Realtime is an invalidation signal; syncNotes retrieves authoritative data. */
 export function subscribeToNoteChanges(client: SupabaseClient, ownerId: string, onChange: () => void): () => void {
   if (!uuidPattern.test(ownerId)) throw new Error('계정 식별자가 올바르지 않습니다.')
-  const channel = client.channel(`notes:${ownerId}:${crypto.randomUUID()}`)
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'notes', filter: `owner_id=eq.${ownerId}` }, onChange)
+  const channelId = crypto.randomUUID()
+  const filter = `owner_id=eq.${ownerId}`
+  const notes = client.channel(`notes:${ownerId}:${channelId}`)
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'notes', filter }, onChange)
+    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'notes', filter }, onChange)
     .subscribe()
-  return () => { void client.removeChannel(channel) }
+  const purges = client.channel(`note-tombstones:${ownerId}:${channelId}`)
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'note_tombstones', filter }, onChange)
+    .subscribe()
+  return () => {
+    void client.removeChannel(notes)
+    void client.removeChannel(purges)
+  }
 }

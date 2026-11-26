@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { registerSW } from 'virtual:pwa-register'
 import type { Session, SupabaseClient, User } from '@supabase/supabase-js'
-import { Check, CheckCheck, Cloud, CloudOff, Download, FileText, FolderHeart, Hash, Image as ImageIcon, LayoutGrid, LoaderCircle, Menu, Pin, Plus, Search, Settings2, Sparkles, Trash2, Video, WifiOff, X } from 'lucide-react'
-import { attachFiles, createNote, db, formatBytes, getSetting, setSetting, updateNote } from './lib/db'
+import { Check, CheckCheck, Cloud, CloudOff, Download, FileText, FolderHeart, Hash, Image as ImageIcon, LayoutGrid, ListChecks, LoaderCircle, Menu, Pin, Plus, Search, Settings2, Sparkles, Trash2, Video, WifiOff, X } from 'lucide-react'
+import { attachFiles, createNote, db, formatBytes, getSetting, purgeNotes, setSetting, trashNotes, updateNote } from './lib/db'
 import { createCloudClient, signOutCloud, subscribeToNoteChanges, validateCloudConfig } from './lib/cloud'
 import { clearCachedOwner, readCachedOwner, writeCachedOwner, type LocalOwner } from './lib/offline-owner'
 import { adoptLocalNotes, syncNotes } from './lib/sync'
@@ -13,11 +13,13 @@ import { deleteCapture, readCapture, type SharedCapture } from './lib/share-inbo
 import { CaptureFileOpenError, listenForCaptureFiles, receiveCaptureFile } from './lib/capture-handoff'
 import { loginSessionId } from './lib/login-session'
 import { useNoteBackNavigation } from './lib/useNoteBackNavigation'
+import { useNoteLongPress } from './lib/useNoteLongPress'
 import type { CloudConfig, Note, NoteFilter, StoredAttachment, StoredImage } from './types'
 import NoteEditor, { type NoteEditorHandle } from './components/NoteEditor'
 import SettingsDialog from './components/SettingsDialog'
 import ImageView from './components/ImageView'
 import LoginPushPrompt from './components/LoginPushPrompt'
+import PurgeDialog from './components/PurgeDialog'
 
 const emptyConfig: CloudConfig = { url: '', anonKey: '', vapidPublicKey: '' }
 const defaultConfig: CloudConfig = {
@@ -44,6 +46,16 @@ interface EditorOperation {
   ownerId: string | null
   isCurrent: () => boolean
 }
+interface NoteSelection {
+  scope: string
+  ids: Set<string>
+}
+interface PurgeRequest {
+  ids: string[]
+  ownerId: string | null
+  editorId: string | null
+  cloud: boolean
+}
 
 export default function App() {
   const allNotes = useLiveQuery(() => db.notes.orderBy('updatedAt').reverse().toArray(), [], [])
@@ -59,6 +71,12 @@ export default function App() {
   const [configReady, setConfigReady] = useState(false)
   const [authReady, setAuthReady] = useState(false)
   const [user, setUser] = useState<LocalOwner | null>(null)
+  const ownerId = user?.id ?? null
+  const [noteSelection, setNoteSelection] = useState<NoteSelection | null>(null)
+  const [purging, setPurging] = useState<PurgeRequest | null>(null)
+  const [purgeError, setPurgeError] = useState('')
+  const [deleting, setDeleting] = useState(false)
+  const deletingRef = useRef(false)
   const [authenticated, setAuthenticated] = useState(false)
   const [pushLogin, setPushLogin] = useState<{ client: SupabaseClient; ownerId: string; id: string } | null>(null)
   const [online, setOnline] = useState(navigator.onLine)
@@ -116,11 +134,20 @@ export default function App() {
   const closeEditor = useCallback(() => {
     editingRef.current = null
     setEditorNote(null)
+    setPurging(previous => previous?.editorId ? null : previous)
   }, [])
-  const requestEditorClose = useCallback(() => noteEditor.current?.requestClose(), [])
+  const requestEditorClose = useCallback(() => {
+    if (deletingRef.current) return
+    if (purging) setPurging(null)
+    else return noteEditor.current?.requestClose()
+  }, [purging])
   useNoteBackNavigation(editorId, requestEditorClose)
   const applyUser = useCallback((next: LocalOwner | null) => {
-    if ((userRef.current?.id ?? null) !== (next?.id ?? null)) closeEditor()
+    if ((userRef.current?.id ?? null) !== (next?.id ?? null)) {
+      closeEditor()
+      setNoteSelection(null)
+      setPurging(null)
+    }
     userRef.current = next
     setUser(next)
   }, [closeEditor])
@@ -234,6 +261,11 @@ export default function App() {
   const totalImageBytes = images.filter(image => currentImageIds.has(image.id)).reduce((sum, image) => sum + image.size, 0)
   const localCount = currentNotes.filter(note => note.cloudOwnerId === null).length
   const pendingCount = currentNotes.filter(note => note.dirty && note.cloudOwnerId === user?.id).length
+  const purgeQueue = useLiveQuery(async () => ({
+    ownerId,
+    count: ownerId ? await db.pendingPurges.where('ownerId').equals(ownerId).count() : 0,
+  }), [ownerId])
+  const pendingPurgeCount = purgeQueue && purgeQueue.ownerId === ownerId ? purgeQueue.count : 0
   const selectedNote = editorNote && (editorNote.cloudOwnerId === null || editorNote.cloudOwnerId === user?.id) ? editorNote : null
   const visibleNotes = currentNotes.filter(note => {
     if (filter === 'trash' ? !note.deletedAt : Boolean(note.deletedAt)) return false
@@ -247,7 +279,24 @@ export default function App() {
     if (sort === 'created') return b.createdAt.localeCompare(a.createdAt)
     return Number(b.pinned) - Number(a.pinned) || b.updatedAt.localeCompare(a.updatedAt)
   })
+  const selectionScope = JSON.stringify([ownerId, filter, search, tag])
+  const selecting = noteSelection?.scope === selectionScope && visibleNotes.length > 0
+  const selectedNotes = selecting ? visibleNotes.filter(note => noteSelection.ids.has(note.id)) : []
+  const toggleSelectedNote = (id: string, forceSelected = false) => {
+    if (deletingRef.current) return
+    setNoteSelection(previous => {
+      const ids = new Set(previous?.scope === selectionScope ? previous.ids : [])
+      if (ids.has(id) && !forceSelected) ids.delete(id)
+      else ids.add(id)
+      return { scope: selectionScope, ids }
+    })
+  }
+  const longPress = useNoteLongPress(selectionScope, id => toggleSelectedNote(id, true))
+  useEffect(() => {
+    setNoteSelection(null)
+  }, [selectionScope, editorId, settingsOpen])
   const performSync = useCallback((manual = false, editorToken?: symbol): Promise<void> => {
+    if (deletingRef.current) return Promise.resolve()
     const currentClient = clientRef.current
     const ownerId = verifiedUserRef.current?.id
     const running = activeSync.current
@@ -266,7 +315,11 @@ export default function App() {
         const now = new Date().toISOString()
         setLastSynced(now); await setSetting('last-synced', now)
         if (report.conflicts) notify(`서로 다른 수정 내용을 ${report.conflicts}개의 충돌 사본으로 보관했어요.`)
-        if (report.pendingRecordings) {
+        if (report.pendingPurges) {
+          const message = 'Supabase 영구 삭제 설정을 완료하면 대기 중인 삭제 내역이 다른 기기에 반영돼요.'
+          setSyncError(message)
+          if (manual) notify(message)
+        } else if (report.pendingRecordings) {
           const message = '녹화 메모는 이 기기에 저장했어요. 기기 간 녹화 동기화 설정을 확인해 주세요.'
           setSyncError(message)
           if (manual) notify(message)
@@ -288,6 +341,7 @@ export default function App() {
   const runEditorOperation = useCallback(async (load: (context: EditorOperation) => Promise<Note | null | undefined>, syncFirst = false) => {
     if (!authReadyRef.current) { notify('연결 상태를 확인하고 있어요. 잠시 뒤 다시 열어 주세요.'); return false }
     if (editingRef.current) { notify('편집 중인 메모를 마친 뒤 열어 주세요.'); return false }
+    if (deletingRef.current) { notify('메모가 삭제되면 다시 열어 주세요.'); return false }
     const token = Symbol('editor')
     editingRef.current = token
     const ownerId = userRef.current?.id ?? null
@@ -329,23 +383,62 @@ export default function App() {
     return () => { clearTimeout(initial); clearInterval(interval); unsubscribe(); window.removeEventListener('focus', onFocus) }
   }, [client, user, authenticated, online, editorId, performSync])
   useEffect(() => {
-    if (!authenticated || !pendingCount || syncing || !online || editorId || syncError) return
+    if (!authenticated || (!pendingCount && !pendingPurgeCount) || syncing || !online || editorId || syncError || deleting) return
     const timer = setTimeout(() => { void performSync() }, 1000)
     return () => clearTimeout(timer)
-  }, [authenticated, pendingCount, syncing, online, editorId, syncError, performSync])
+  }, [authenticated, pendingCount, pendingPurgeCount, syncing, online, editorId, syncError, deleting, performSync])
+  function requestPurge(notes: Note[], fromEditor = false) {
+    if (!notes.length || deletingRef.current) return
+    setPurgeError('')
+    setPurging({
+      ids: notes.map(note => note.id),
+      ownerId,
+      editorId: fromEditor ? notes[0].id : null,
+      cloud: notes.some(note => note.cloudOwnerId !== null),
+    })
+  }
+  async function deleteNotes(ids: string[], request?: PurgeRequest) {
+    if (!ids.length || deletingRef.current) return
+    const deletionOwnerId = request ? request.ownerId : ownerId
+    deletingRef.current = true
+    setDeleting(true)
+    setPurgeError('')
+    try {
+      await activeSync.current?.promise
+      if ((userRef.current?.id ?? null) !== deletionOwnerId) return
+      const count = await (request ? purgeNotes(ids, deletionOwnerId) : trashNotes(ids, deletionOwnerId))
+      if (request) {
+        setPurging(null)
+        if (request.editorId) closeEditor()
+      }
+      setNoteSelection(null)
+      if (!count) notify('선택한 메모가 이미 이동되었거나 삭제됐어요.')
+      else if (request?.cloud) notify(`이 기기에서 메모 ${count}개를 영구 삭제했어요. 다른 기기에도 동기화할게요.`)
+      else if (request) notify(`메모 ${count}개를 영구 삭제했어요.`)
+      else notify(`메모 ${count}개를 휴지통으로 옮겼어요.`)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '메모를 삭제하지 못했습니다.'
+      if (request) setPurgeError(message)
+      else notify(message)
+    } finally {
+      deletingRef.current = false
+      setDeleting(false)
+    }
+  }
   async function newNote() {
     await runEditorOperation(({ ownerId }) => createNote(ownerId))
   }
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement
-      if (target.matches('input, textarea, [contenteditable]') || target.closest('dialog[open]') || editorId || settingsOpen) return
+      if (target.matches('input, textarea, [contenteditable]') || target.closest('dialog[open]') || event.defaultPrevented || purging || editorId || settingsOpen) return
+      if (event.key === 'Escape' && selecting) { setNoteSelection(null); return }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k' || event.key === '/') { event.preventDefault(); searchRef.current?.focus() }
       if (event.key.toLowerCase() === 'n' && !event.ctrlKey && !event.metaKey) { event.preventDefault(); void newNote() }
     }
     document.addEventListener('keydown', listener)
     return () => document.removeEventListener('keydown', listener)
-  }, [editorId, settingsOpen, user])
+  }, [editorId, settingsOpen, user, purging, selecting])
   const openPushedNote = useCallback(async (noteId: string | undefined) => {
     if (!noteId || !/^[0-9a-f-]{36}$/i.test(noteId)) return
     if (editingRef.current) { notify('편집을 마친 뒤 새 메모를 열어 주세요.'); return }
@@ -367,7 +460,7 @@ export default function App() {
     const params = new URLSearchParams(location.search)
     const windowsCaptureId = windowsCaptureIds[0]
     const captureId = windowsCaptureId ?? params.get('capture')
-    if (!captureId || !configReady || !authReady || processingCapture.current || editingRef.current || (windowsCaptureId && settingsOpen)) return
+    if (!captureId || !configReady || !authReady || deleting || purging || processingCapture.current || editingRef.current || (windowsCaptureId && settingsOpen)) return
     processingCapture.current = true
     const initialOwner = userRef.current?.id ?? null
     void runEditorOperation(async ({ ownerId, isCurrent }) => {
@@ -415,7 +508,7 @@ export default function App() {
       if (windowsCaptureId) setWindowsCaptureIds(ids => ids.filter(id => id !== windowsCaptureId))
       else if ((userRef.current?.id ?? null) !== initialOwner) setCaptureRetry(value => value + 1)
     })
-  }, [configReady, authReady, user?.id, editorId, settingsOpen, windowsCaptureIds, captureRetry, runEditorOperation, notify])
+  }, [configReady, authReady, user?.id, editorId, settingsOpen, deleting, purging, windowsCaptureIds, captureRetry, runEditorOperation, notify])
   useEffect(() => {
     const params = new URLSearchParams(location.search)
     const noteId = params.get('note')
@@ -473,7 +566,14 @@ export default function App() {
     })
   }
   const pageTitle = tag ? `#${tag}` : navigation.find(item => item.id === filter)!.name
-  const syncLabel = !online ? '오프라인 · 기기에 저장' : syncing ? '기기 간 동기화 중' : syncError ? '동기화 확인 필요' : user ? !authenticated ? '로그인 확인 중 · 기기에 저장' : pendingCount ? `${pendingCount}개 메모 전송 대기` : '내 기기와 연결됨' : '이 기기에 저장 중'
+  const syncLabel = !online ? (pendingPurgeCount ? '오프라인 · 영구 삭제 동기화 대기' : '오프라인 · 기기에 저장')
+    : syncing ? '기기 간 동기화 중'
+    : syncError ? '동기화 확인 필요'
+    : !user ? '이 기기에 저장 중'
+    : !authenticated ? '로그인 확인 중 · 기기에 저장'
+    : pendingPurgeCount ? `${pendingPurgeCount}개 영구 삭제 전송 대기`
+    : pendingCount ? `${pendingCount}개 메모 전송 대기`
+    : '내 기기와 연결됨'
   return <div className="app-shell">
     {sidebarOpen && <div className="sidebar-shade" onClick={() => setSidebarOpen(false)} />}
     <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
@@ -487,9 +587,9 @@ export default function App() {
       </div>
     </aside>
     <main className="main-area">
-      <header className="topbar"><button className="icon-button mobile-menu" aria-label="메뉴 열기" onClick={() => setSidebarOpen(true)}><Menu size={22} /></button><div className="breadcrumb">나의 공간<span>/</span><strong>{pageTitle}</strong></div><div className="topbar-actions"><button className={`sync-status ${syncError ? 'warning' : ''}`} title={syncError || (lastSynced ? `마지막 동기화: ${new Date(lastSynced).toLocaleString('ko')}` : '동기화 설정')} onClick={() => user ? void performSync(true) : setSettingsOpen(true)}>{!online ? <WifiOff size={16} /> : syncing ? <LoaderCircle size={16} className="spin" /> : user ? <Cloud size={16} /> : <CloudOff size={16} />}<span>{syncLabel}</span></button><button className="icon-button" aria-label="설정 열기" title="설정" onClick={() => setSettingsOpen(true)}><Settings2 size={20} /></button></div></header>
+      <header className="topbar"><button className="icon-button mobile-menu" aria-label="메뉴 열기" onClick={() => setSidebarOpen(true)}><Menu size={22} /></button><div className="breadcrumb">나의 공간<span>/</span><strong>{pageTitle}</strong></div><div className="topbar-actions"><button className={`sync-status ${syncError ? 'warning' : ''}`} aria-label={syncLabel} title={syncError || (lastSynced ? `마지막 동기화: ${new Date(lastSynced).toLocaleString('ko')}` : '동기화 설정')} onClick={() => user ? void performSync(true) : setSettingsOpen(true)}>{!online ? <WifiOff size={16} /> : syncing ? <LoaderCircle size={16} className="spin" /> : user ? <Cloud size={16} /> : <CloudOff size={16} />}<span>{syncLabel}</span></button><button className="icon-button" aria-label="설정 열기" title="설정" onClick={() => setSettingsOpen(true)}><Settings2 size={20} /></button></div></header>
       <div className="workspace" onDragOver={event => { if (!editorId) event.preventDefault() }} onDrop={event => { if (!editorId) { event.preventDefault(); void importImages(Array.from(event.dataTransfer.files)) } }}>
-        <section className="page-heading"><div><div className="eyebrow"><span />KEEP YOUR LITTLE THINGS</div><h1>{pageTitle}<span>{visibleNotes.length}</span></h1><p>{filter === 'trash' ? '잠시 내려놓은 기록. 언제든 다시 꺼낼 수 있어요.' : filter === 'images' ? '눈에 담았던 순간을, 한곳에 모아두세요.' : filter === 'pinned' ? '자주 꺼내 보고 싶은 생각들을 모았어요.' : '스치는 생각부터 소중한 순간까지, 가볍게 담아두세요.'}</p></div><button className="button primary heading-new" onClick={() => void newNote()}><Plus size={18} />새 메모</button></section>
+        <section className="page-heading"><div><div className="eyebrow"><span />KEEP YOUR LITTLE THINGS</div><h1>{pageTitle}<span>{visibleNotes.length}</span></h1><p>{filter === 'trash' ? '휴지통의 메모를 복원하거나 영구 삭제할 수 있어요.' : filter === 'images' ? '눈에 담았던 순간을, 한곳에 모아두세요.' : filter === 'pinned' ? '자주 꺼내 보고 싶은 생각들을 모았어요.' : '스치는 생각부터 소중한 순간까지, 가볍게 담아두세요.'}</p></div><button className="button primary heading-new" onClick={() => void newNote()}><Plus size={18} />새 메모</button></section>
         {!user && <div className="local-banner"><div className="banner-icon"><CheckCheck size={19} /></div><p><strong>지금은 이 기기에 안전하게 담고 있어요.</strong><span>인터넷 없이도 기록하고, 준비되면 내 기기들을 연결하세요.</span></p><button onClick={() => setSettingsOpen(true)}>기기 연결</button></div>}
         {user && localCount > 0 && <div className="local-banner"><div className="banner-icon"><Cloud size={19} /></div><p><strong>이 기기에만 있는 메모가 {localCount}개 있어요.</strong><span>계정에 연결하면 다른 기기에서도 볼 수 있습니다.</span></p><button onClick={() => void adopt().catch(error => notify(error.message))}>함께 동기화</button></div>}
         {windowsCaptureOpenError && <div className="local-banner">
@@ -503,19 +603,68 @@ export default function App() {
             if (file) importWindowsCapture(file)
           }} />
         </div>}
-        <div className="collection-toolbar"><label className="search-box"><Search size={18} /><input ref={searchRef} type="search" placeholder="제목, 내용, 태그로 찾아보세요" aria-label="메모 검색" value={search} onChange={event => setSearch(event.target.value)} /><kbd>/</kbd></label><div className="view-controls"><select aria-label="메모 정렬" value={sort} onChange={event => setSort(event.target.value as typeof sort)}><option value="updated">최근 수정순</option><option value="created">최근 작성순</option><option value="title">제목순</option></select><span /><button className={`icon-button ${gridView ? 'selected' : ''}`} aria-label="격자로 보기" aria-pressed={gridView} onClick={() => setGridView(true)}><LayoutGrid size={18} /></button><button className={`icon-button ${!gridView ? 'selected' : ''}`} aria-label="목록으로 보기" aria-pressed={!gridView} onClick={() => setGridView(false)}><FileText size={18} /></button></div></div>
+        <div className="collection-toolbar"><label className="search-box"><Search size={18} /><input ref={searchRef} type="search" placeholder="제목, 내용, 태그로 찾아보세요" aria-label="메모 검색" value={search} onChange={event => setSearch(event.target.value)} /><kbd>/</kbd></label><div className="view-controls"><select aria-label="메모 정렬" value={sort} onChange={event => setSort(event.target.value as typeof sort)}><option value="updated">최근 수정순</option><option value="created">최근 작성순</option><option value="title">제목순</option></select><span /><button className={`icon-button ${gridView ? 'selected' : ''}`} aria-label="격자로 보기" aria-pressed={gridView} onClick={() => setGridView(true)}><LayoutGrid size={18} /></button><button className={`icon-button ${!gridView ? 'selected' : ''}`} aria-label="목록으로 보기" aria-pressed={!gridView} onClick={() => setGridView(false)}><FileText size={18} /></button>
+          {visibleNotes.length > 0 && <button
+            type="button"
+            className={`button small selection-toggle ${selecting ? 'selection-active' : 'secondary'}`}
+            aria-pressed={selecting}
+            disabled={deleting}
+            onClick={() => setNoteSelection(selecting ? null : { scope: selectionScope, ids: new Set() })}
+          >{selecting ? <X size={16} aria-hidden="true" /> : <ListChecks size={16} aria-hidden="true" />}{selecting ? '선택 해제' : '선택'}</button>}
+        </div></div>
         {tag && <div className="active-filter"><span>#{tag}<button aria-label="태그 필터 해제" onClick={() => setTag(null)}><X size={13} /></button></span></div>}
-        {visibleNotes.length ? <div className={`notes-grid ${gridView ? '' : 'list-view'}`}>{visibleNotes.map(note => <article className={`note-card ${note.attachments.length ? 'has-image' : ''} ${note.pinned ? 'is-pinned' : ''}`} key={note.id} tabIndex={0} role="button" aria-label={`${noteTitle(note)} 메모 열기`} onClick={() => void openNote(note.id)} onKeyDown={event => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); void openNote(note.id) } }}>
+        {selecting && <div className="selection-actions" role="group" aria-label="선택한 메모 관리">
+          <span role="status">{selectedNotes.length}개 선택</span>
+          <button
+            type="button"
+            className={`button small ${filter === 'trash' ? 'danger-solid' : 'secondary'}`}
+            disabled={!selectedNotes.length || deleting}
+            onClick={() => {
+              if (filter === 'trash') requestPurge(selectedNotes)
+              else void deleteNotes(selectedNotes.map(note => note.id))
+            }}
+          ><Trash2 size={16} aria-hidden="true" />{filter === 'trash' ? '영구 삭제' : '휴지통으로 이동'}</button>
+        </div>}
+        {visibleNotes.length ? <div className={`notes-grid ${gridView ? '' : 'list-view'}`}>{visibleNotes.map(note => {
+          const checked = selecting && noteSelection.ids.has(note.id)
+          const activate = () => {
+            if (selecting) toggleSelectedNote(note.id)
+            else void openNote(note.id)
+          }
+          return <article
+            className={`note-card ${note.attachments.length ? 'has-image' : ''} ${note.pinned ? 'is-pinned' : ''} ${checked ? 'card-selected' : ''}`}
+            key={note.id}
+            tabIndex={0}
+            role="button"
+            aria-label={`${noteTitle(note)} ${selecting ? '선택' : '메모 열기'}`}
+            aria-pressed={selecting ? checked : undefined}
+            onPointerDown={event => longPress.start(event, note.id)}
+            onPointerMove={longPress.move}
+            onPointerUp={longPress.end}
+            onPointerCancel={longPress.end}
+            onPointerLeave={longPress.end}
+            onContextMenu={longPress.contextMenu}
+            onDragStart={event => { if (event.target instanceof HTMLImageElement) event.preventDefault() }}
+            onClick={event => { if (!longPress.consumeClick(event, note.id)) activate() }}
+            onKeyDown={event => {
+              if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
+                event.preventDefault()
+                if (!event.repeat) activate()
+              }
+            }}
+          >
           {note.attachments[0] && <div className="note-card-image">{note.attachments[0].mime === 'video/mp4' ? <div className="video-card-preview" aria-hidden="true"><Video size={30} /></div> : <ImageView image={note.attachments[0]} />}{note.attachments.length > 1 && <span className="image-count"><ImageIcon size={13} />{note.attachments.length}</span>}</div>}
-          <div className="note-card-content"><div className="note-card-top"><span className={`note-kind ${note.attachments.length ? 'image-kind' : ''}`}>{note.attachments.some(attachment => attachment.mime === 'video/mp4') ? <><Video size={13} />녹화 메모</> : hasImage(note) ? <><ImageIcon size={13} />이미지 메모</> : <><FileText size={13} />텍스트 메모</>}</span>{!note.deletedAt && <button className={`card-pin ${note.pinned ? 'pinned' : ''}`} aria-label={note.pinned ? '고정 해제' : '메모 고정'} title={note.pinned ? '고정 해제' : '메모 고정'} onClick={event => { event.stopPropagation(); void updateNote(note.id, { pinned: !note.pinned }).catch(error => notify(error.message)) }}><Pin size={15} /></button>}</div><h2>{noteTitle(note)}</h2>{note.body && <p className="note-excerpt">{excerpt(note.body)}</p>}{note.tags.length > 0 && <div className="note-tags">{note.tags.slice(0, 3).map(value => <button key={value} onClick={event => { event.stopPropagation(); setTag(value); setFilter('all') }}>#{value}</button>)}{note.tags.length > 3 && <span>+{note.tags.length - 3}</span>}</div>}<div className="note-card-footer"><time dateTime={note.updatedAt}>{dateLabel(note.updatedAt)}</time><span title={note.cloudOwnerId ? note.dirty ? '동기화 대기' : '동기화됨' : '이 기기에 저장됨'}>{note.cloudOwnerId ? note.dirty ? <Cloud size={14} /> : <CheckCheck size={14} /> : <Check size={14} />}</span></div></div>
-        </article>)}</div> : <section className="empty-state"><div className="empty-art"><div className="art-paper back" /><div className="art-paper front"><span /><span /><span /><div className="art-dot"><Sparkles size={21} /></div></div><div className="art-spark one" /><div className="art-spark two" /></div><h2>{search || tag ? '아직 일치하는 메모가 없어요' : filter === 'trash' ? '휴지통이 비어 있어요' : filter === 'pinned' ? '오래 간직할 생각을 고정해 보세요' : filter === 'images' ? '첫 번째 이미지를 모아보세요' : '작은 기록이 모이는 곳'}</h2><p>{search || tag ? '다른 단어나 태그로 다시 찾아보세요.' : filter === 'trash' ? '휴지통으로 옮긴 메모는 이곳에서 복원할 수 있어요.' : filter === 'pinned' ? '메모의 핀 아이콘을 누르면 이곳에 모입니다.' : '오늘의 생각 한 줄, 좋아하는 사진 한 장.\n무엇이든 담아두면 필요할 때 다시 만날 수 있어요.'}</p>{!search && !tag && filter !== 'trash' && filter !== 'pinned' && <button className="button primary" onClick={() => void newNote()}><Plus size={18} />첫 메모 남기기</button>}<div className="empty-features"><span><FileText size={15} />텍스트와 Markdown</span><span><ImageIcon size={15} />가벼운 WebP 이미지</span><span><WifiOff size={15} />오프라인에서도</span></div></section>}
+          <div className="note-card-content"><div className="note-card-top"><span className={`note-kind ${note.attachments.length ? 'image-kind' : ''}`}>{note.attachments.some(attachment => attachment.mime === 'video/mp4') ? <><Video size={13} />녹화 메모</> : hasImage(note) ? <><ImageIcon size={13} />이미지 메모</> : <><FileText size={13} />텍스트 메모</>}</span>{selecting ? <span className="card-selection-check" aria-hidden="true">{checked && <Check size={15} />}</span> : !note.deletedAt && <button className={`card-pin ${note.pinned ? 'pinned' : ''}`} aria-label={note.pinned ? '고정 해제' : '메모 고정'} title={note.pinned ? '고정 해제' : '메모 고정'} onClick={event => { event.stopPropagation(); void updateNote(note.id, { pinned: !note.pinned }).catch(error => notify(error.message)) }}><Pin size={15} /></button>}</div><h2>{noteTitle(note)}</h2>{note.body && <p className="note-excerpt">{excerpt(note.body)}</p>}{note.tags.length > 0 && <div className="note-tags">{note.tags.slice(0, 3).map(value => selecting ? <span className="selection-tag" key={value}>#{value}</span> : <button key={value} onClick={event => { event.stopPropagation(); setTag(value); setFilter('all') }}>#{value}</button>)}{note.tags.length > 3 && <span>+{note.tags.length - 3}</span>}</div>}<div className="note-card-footer"><time dateTime={note.updatedAt}>{dateLabel(note.updatedAt)}</time><span title={note.cloudOwnerId ? note.dirty ? '동기화 대기' : '동기화됨' : '이 기기에 저장됨'}>{note.cloudOwnerId ? note.dirty ? <Cloud size={14} /> : <CheckCheck size={14} /> : <Check size={14} />}</span></div></div>
+          </article>
+        })}</div> : <section className="empty-state"><div className="empty-art"><div className="art-paper back" /><div className="art-paper front"><span /><span /><span /><div className="art-dot"><Sparkles size={21} /></div></div><div className="art-spark one" /><div className="art-spark two" /></div><h2>{search || tag ? '아직 일치하는 메모가 없어요' : filter === 'trash' ? '휴지통이 비어 있어요' : filter === 'pinned' ? '오래 간직할 생각을 고정해 보세요' : filter === 'images' ? '첫 번째 이미지를 모아보세요' : '작은 기록이 모이는 곳'}</h2><p>{search || tag ? '다른 단어나 태그로 다시 찾아보세요.' : filter === 'trash' ? '휴지통으로 옮긴 메모는 이곳에서 복원할 수 있어요.' : filter === 'pinned' ? '메모의 핀 아이콘을 누르면 이곳에 모입니다.' : '오늘의 생각 한 줄, 좋아하는 사진 한 장.\n무엇이든 담아두면 필요할 때 다시 만날 수 있어요.'}</p>{!search && !tag && filter !== 'trash' && filter !== 'pinned' && <button className="button primary" onClick={() => void newNote()}><Plus size={18} />첫 메모 남기기</button>}<div className="empty-features"><span><FileText size={15} />텍스트와 Markdown</span><span><ImageIcon size={15} />가벼운 WebP 이미지</span><span><WifiOff size={15} />오프라인에서도</span></div></section>}
         <footer className="workspace-footer"><span>나만의 속도로, 차곡차곡.</span><span>{activeNotes.length}개의 기록<span className="footer-divider">·</span>{pwaReady ? '오프라인 준비됨' : '오프라인 준비 중'}</span></footer>
       </div>
       <button className="mobile-fab" aria-label="새 메모" onClick={() => void newNote()}><Plus size={26} /></button>
     </main>
-    {selectedNote && <NoteEditor key={selectedNote.id} ref={noteEditor} note={selectedNote} onClose={closeEditor} notify={notify} />}
+    {selectedNote && <NoteEditor key={selectedNote.id} ref={noteEditor} note={selectedNote} onClose={closeEditor} onPurge={note => requestPurge([note], true)} purgeDialogOpen={purging?.editorId === selectedNote.id} notify={notify} />}
+    {purging && <PurgeDialog count={purging.ids.length} cloud={purging.cloud} busy={deleting} error={purgeError} onCancel={() => setPurging(null)} onConfirm={() => void deleteNotes(purging.ids, purging)} />}
     {settingsOpen && <SettingsDialog config={config} client={client} user={user} authenticated={authenticated && online} onSignOut={logout} onSaveConfig={saveConfig} onClose={() => setSettingsOpen(false)} notify={notify} onSync={() => performSync(true)} onAdopt={adopt} onWindowsCapture={importWindowsCapture} syncing={syncing} />}
-    {!editorId && !settingsOpen && !windowsCaptureIds.length && online && authenticated && client && pushLogin?.client === client && pushLogin.ownerId === user?.id &&
+    {!editorId && !settingsOpen && !purging && !windowsCaptureIds.length && online && authenticated && client && pushLogin?.client === client && pushLogin.ownerId === user?.id &&
       <LoginPushPrompt key={pushLogin.id} client={client} projectUrl={config.url} ownerId={pushLogin.ownerId} sessionId={pushLogin.id} publicKey={config.vapidPublicKey} workerReady={pwaReady} />}
     {toast && <div className="toast" role="status"><Check size={17} /><span>{toast}</span><button className="icon-button" aria-label="알림 닫기" onClick={() => setToast('')}><X size={15} /></button></div>}
     {updateReady && <div className="update-toast" role="status"><span>새 버전이 준비됐어요.</span><button disabled={Boolean(editorId)} onClick={() => void updateWorker.current?.(true)}>{editorId ? '메모를 마치면 업데이트' : '업데이트'}</button></div>}

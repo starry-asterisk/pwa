@@ -10,11 +10,19 @@ import Markdown from './Markdown'
 import ShareDialog from './ShareDialog'
 
 export type NoteEditorHandle = { requestClose: () => void | Promise<void> }
-interface Props { note: Note; onClose: () => void; notify: (message: string) => void; ref?: Ref<NoteEditorHandle> }
-export default function NoteEditor({ note, onClose, notify, ref }: Props) {
+interface Props {
+  note: Note
+  onClose: () => void
+  onPurge: (note: Note) => void
+  purgeDialogOpen: boolean
+  notify: (message: string) => void
+  ref?: Ref<NoteEditorHandle>
+}
+export default function NoteEditor({ note, onClose, onPurge, purgeDialogOpen, notify, ref }: Props) {
   // App supplies the initial snapshot after waiting for active synchronization.
   // Only metadata follows IndexedDB changes; the user's draft remains local here.
-  const currentNote = useLiveQuery(() => db.notes.get(note.id), [note.id], note) || note
+  const liveNote = useLiveQuery(async () => (await db.notes.get(note.id)) ?? null, [note.id], note)
+  const currentNote = liveNote ?? note
   const stillImages = currentNote.attachments.filter(attachment => attachment.mime === 'image/webp')
   const [title, setTitle] = useState(note.title)
   const [body, setBody] = useState(note.body)
@@ -35,6 +43,7 @@ export default function NoteEditor({ note, onClose, notify, ref }: Props) {
   const timeout = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const draft = useRef({ title, body, tags: note.tags })
   const mounted = useRef(true)
+  const removed = useRef(false)
   const processingRef = useRef(false)
   const closingRef = useRef(false)
   const saves = useRef<DraftSaveQueue<typeof draft.current> | null>(null)
@@ -50,10 +59,15 @@ export default function NoteEditor({ note, onClose, notify, ref }: Props) {
       mounted.current = false
       clearTimeout(timeout.current)
       // Account changes or navigation can unmount before the debounce fires.
-      void flush().catch(() => {})
+      if (!removed.current) void flush().catch(() => {})
       previous?.focus()
     }
   }, [])
+  useEffect(() => {
+    if (liveNote !== null) return
+    removed.current = true
+    onClose()
+  }, [liveNote, onClose])
   async function flush(): Promise<void> {
     clearTimeout(timeout.current)
     try {
@@ -100,7 +114,7 @@ export default function NoteEditor({ note, onClose, notify, ref }: Props) {
   } }))
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
-      if (shareTarget) return
+      if (shareTarget || purgeDialogOpen) return
       if (event.key === 'Tab') {
         const scope = lightbox ? dialogRef.current?.querySelector('.lightbox') : dialogRef.current
         const items = Array.from(scope?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]):not([hidden]), textarea:not([disabled]), summary, a[href], video[controls]') || []).filter(item => item.getClientRects().length > 0)
@@ -167,7 +181,12 @@ export default function NoteEditor({ note, onClose, notify, ref }: Props) {
           <button className="button small primary" onClick={() => void close()} disabled={processing || closing}>{closing ? '저장 중' : '완료'}</button>
         </div>
       </div>
-      {currentNote.deletedAt && <div className="trash-notice">휴지통에 있는 메모입니다. 복원하면 다시 편집할 수 있어요.</div>}
+      {currentNote.deletedAt && <div className="trash-notice">
+        <span>휴지통에 있는 메모입니다. 복원하면 다시 편집할 수 있어요.</span>
+        <button className="button small danger" type="button" disabled={closing || processing} onClick={() => onPurge(currentNote)}>
+          <Trash2 size={16} aria-hidden="true" />영구 삭제
+        </button>
+      </div>}
       <div className="editor-scroll">
         <input ref={titleRef} className="editor-title" aria-label="메모 제목" placeholder="어떤 생각을 담아둘까요?" maxLength={200} value={title} disabled={closing || Boolean(currentNote.deletedAt)} onChange={event => { setTitle(event.target.value); changed({ title: event.target.value }) }} />
         <div className="editor-date">{new Intl.DateTimeFormat('ko', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'short' }).format(new Date(note.createdAt))}<span>·</span>나만의 메모</div>

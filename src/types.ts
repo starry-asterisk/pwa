@@ -49,5 +49,6 @@ export interface SyncReport {
   downloaded: number
   conflicts: number
   pendingRecordings?: number
+  pendingPurges?: number
 }
 export type NoteFilter = 'all' | 'pinned' | 'images' | 'trash'

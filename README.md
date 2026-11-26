@@ -56,7 +56,7 @@ npm run test:e2e
 
 완전 로컬 모드에서는 계정이나 서버 설정이 필요하지 않습니다. 설정 → 동기화에서 프로젝트 URL과 Publishable/anon 공개 키를 입력할 수도 있고, `.env.example`을 `.env.local`로 복사해 빌드 기본값으로 사용할 수도 있습니다.
 
-1. 새 프로젝트는 SQL Editor에서 [`supabase/migrations/202611240001_initial.sql`](supabase/migrations/202611240001_initial.sql)을 실행합니다. 녹화 메모를 기기 간 동기화하려면 [`supabase/migrations/202611250001_recordings.sql`](supabase/migrations/202611250001_recordings.sql)도 한 번 실행합니다.
+1. 새 프로젝트는 SQL Editor에서 [초기 마이그레이션](supabase/migrations/202611240001_initial.sql), [녹화 마이그레이션](supabase/migrations/202611250001_recordings.sql), [영구 삭제 마이그레이션](supabase/migrations/202611260001_permanent_delete.sql)을 순서대로 한 번씩 적용합니다.
 2. Auth → URL Configuration에서 개발·배포 주소를 허용합니다.
 3. 앱 설정에서 본인 이메일로 로그인합니다.
 4. 기존 로컬 메모는 **이 기기의 로컬 메모도 연결**을 선택해야 계정으로 업로드됩니다.
@@ -91,7 +91,8 @@ npm run test:e2e
 - IndexedDB는 브라우저의 저장소 삭제/기기 분실에 대비한 백업을 대신하지 않습니다. 중요한 기록은 ZIP 백업을 별도로 보관하세요.
 - 백업 ZIP은 모바일 메모리 보호를 위해 **50MiB**, 이미지 입력은 **25MiB**, 저장 WebP는 **20MiB**, 한 메모의 첨부는 **100개**로 제한합니다.
 - GIF·움직이는 WebP/APNG는 정지 이미지로 조용히 바꾸지 않고 안내 후 거절합니다.
-- 영구 삭제 기능은 아직 없습니다. 휴지통은 복원 가능하며 첨부파일도 보관하므로 사용 용량에 포함됩니다.
+- 목록에서 메모를 길게 누르거나 **선택**을 눌러 여러 메모를 휴지통으로 옮길 수 있습니다. 휴지통에서 **영구 삭제**를 확인하면 복원할 수 없으며, 로그인한 기기에는 다음 동기화 때 반영됩니다.
+- 영구 삭제는 다른 메모에서 사용 중인 첨부파일과 이미 내보낸 ZIP·다운로드 사본을 보존합니다.
 - 메모 원문과 이미지는 별도 종단간 암호화를 적용하지 않았습니다. Supabase 비공개 저장소·RLS·HTTPS를 사용합니다.
 - Supabase 무료 요금제의 DB·파일·전송량·휴면 정책은 별도 적용됩니다.
 - 알림은 앱을 강제로 종료한 상태의 완전한 백그라운드 동기화를 보장하지 않습니다. 앱을 열 때도 최신 상태를 확인합니다.

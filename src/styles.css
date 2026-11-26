@@ -34,3 +34,24 @@ html{scrollbar-gutter:auto}.sidebar{z-index:70;width:254px;padding-top:max(28px,
   max-height: min(48dvh, 480px);
   background: #181524;
 }
+
+.selection-toggle.button.small{margin-left:6px;padding-inline:11px}
+.selection-toggle.selection-active{border-color:#d4c7ef;background:#eee8fd;color:#614293}
+.selection-actions{position:sticky;z-index:12;top:76px;display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:15px;padding:8px 11px 8px 14px;border:1px solid #ded4f4;border-radius:9px;background:#f5f1ff;color:#614293;font-size:14px;font-weight:600}
+.note-card{touch-action:manipulation}
+.note-card.card-selected{border-color:#8b72d0;background:#faf8ff;box-shadow:0 0 0 1px #8b72d0}
+.card-selection-check{display:grid;place-items:center;flex-shrink:0;width:23px;height:23px;border:1px solid #b7a9da;border-radius:6px;background:#fff;color:#fff}
+.card-selected .card-selection-check{border-color:var(--accent);background:var(--accent)}
+.note-tags .selection-tag{max-width:100%;overflow:hidden;padding:3px 7px;border-radius:5px;background:#f1ecfa;color:#78558d;text-overflow:ellipsis;white-space:nowrap}
+.button.danger-solid{background:#ab2d48;color:#fff}
+.button.danger-solid:hover:not(:disabled){background:#94223a}
+.trash-notice{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:8px 14px}
+.trash-notice .button{flex-shrink:0}
+.purge-dialog{width:min(420px,calc(100% - 32px));max-height:calc(100dvh - 32px);margin:auto;padding:24px;border:1px solid #e5e3ed;border-radius:14px;background:#fff;color:#292d3e;box-shadow:0 20px 55px #22263530;overscroll-behavior:contain}
+.purge-dialog::backdrop{background:#22263580;backdrop-filter:blur(3px)}
+.purge-dialog h2{margin:0 0 9px;font-size:20px;line-height:1.45}
+.purge-dialog p{margin:0 0 19px;color:#58677d;font-size:14px;line-height:1.65}
+.purge-dialog .purge-error{color:#a62943}
+.purge-dialog-actions{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:8px}
+@media(max-width:760px){.selection-actions{top:68px}.selection-toggle.button.small{min-height:40px}}
+@media(any-pointer:coarse){.note-card{-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}}

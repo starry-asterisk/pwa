@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { CloudNote, Note, NoteContent } from '../types'
 import { validateCloudConfig } from './cloud'
-import { createNote, db, updateNote } from './db'
+import { createNote, db, purgeNotes, trashNotes, updateNote } from './db'
 import { adoptLocalNotes, syncNotes } from './sync'
 
 const ownerId = 'f485e060-eef0-4f14-9742-57d0891a7cab'
@@ -26,22 +26,71 @@ interface SaveParams {
   p_origin_device_id: string
 }
 interface RpcResult {
-  data: { status: 'saved' | 'conflict'; note: CloudNote } | boolean | null
+  data: { status: 'saved' | 'conflict'; note: CloudNote } | { status: 'purged' }
+    | { status: 'attachment_purged'; object_names: string[] }
+    | Array<{ id: string; status: 'purged' }> | boolean | number | null
   error: { message: string; code?: string } | null
 }
 
+interface PurgeParams {
+  p_ids: string[]
+  p_attachment_names: string[]
+  p_names: string[]
+}
+
 function fakeCloud(initial: CloudNote[] = []) {
-  const state = { owner: ownerId, supportsRecordings: true }
+  const state = { owner: ownerId, supportsRecordings: true, supportsPurges: true }
   const remote = new Map(initial.map(note => [note.id, structuredClone(note)]))
   const images = new Map<string, Blob>()
+  const tombstones = new Map<string, { id: string; owner_id: string }>()
+  const cleanup = new Map<string, { object_name: string; owner_id: string; cleaned_at: string | null }>()
   const calls: string[] = []
-  const hooks: { afterSave?: () => Promise<void>; afterDownload?: () => Promise<void> } = {}
-  const rpc = vi.fn(async (name: string, params: SaveParams): Promise<RpcResult> => {
+  const hooks: { beforeSave?: (params: SaveParams) => Promise<void>; afterSave?: () => Promise<void>; afterDownload?: () => Promise<void> } = {}
+  const path = (attachment: NoteContent['attachments'][number]) =>
+    `${state.owner}/${attachment.id}.${attachment.mime === 'video/mp4' ? 'mp4' : 'webp'}`
+  const queueCleanup = (paths: string[]) => {
+    const referenced = new Set([...remote.values()].filter(note => note.owner_id === state.owner)
+      .flatMap(note => note.data.attachments.map(path)))
+    for (const name of paths) if (images.has(name) && !referenced.has(name) && !cleanup.has(name)) {
+      cleanup.set(name, { object_name: name, owner_id: state.owner, cleaned_at: null })
+    }
+  }
+  const purgeRemote = (id: string) => {
+    const names = remote.get(id)?.data.attachments.map(path) ?? []
+    remote.delete(id)
+    tombstones.set(id, { id, owner_id: state.owner })
+    queueCleanup(names)
+  }
+  const rpc = vi.fn(async (name: string, params: SaveParams & PurgeParams): Promise<RpcResult> => {
     if (name === 'supports_recording_sync') {
       return state.supportsRecordings ? { data: true, error: null }
         : { data: null, error: { message: 'Unknown function', code: 'PGRST202' } }
     }
+    if (name === 'purge_notes') {
+      for (const id of params.p_ids) purgeRemote(id)
+      queueCleanup(params.p_attachment_names)
+      const data = params.p_ids.map(id => ({ id, status: 'purged' as const }))
+      return { data, error: null }
+    }
+    if (name === 'ack_note_attachment_gc') {
+      let count = 0
+      for (const objectName of params.p_names) {
+        const row = cleanup.get(objectName)
+        if (row && !row.cleaned_at && !images.has(objectName)) {
+          row.cleaned_at = new Date().toISOString()
+          count++
+        }
+      }
+      return { data: count, error: null }
+    }
     calls.push('save')
+    await hooks.beforeSave?.(params)
+    if (tombstones.has(params.p_id)) {
+      queueCleanup(params.p_data.attachments.map(path))
+      return { data: { status: 'purged' }, error: null }
+    }
+    const retired = params.p_data.attachments.map(path).filter(name => cleanup.has(name))
+    if (retired.length) return { data: { status: 'attachment_purged', object_names: retired }, error: null }
     const existing = remote.get(params.p_id)
     if (existing && existing.version !== params.p_version && existing.version !== params.p_expected_version) {
       return { data: { status: 'conflict', note: structuredClone(existing) }, error: null }
@@ -54,18 +103,34 @@ function fakeCloud(initial: CloudNote[] = []) {
     await hooks.afterSave?.()
     return { data: { status: 'saved', note: structuredClone(saved) }, error: null }
   })
-  const query = {
-    select: () => query,
-    eq: () => query,
-    order: () => query,
-    range: vi.fn(async (from: number, to: number) => ({
-      data: [...remote.values()].filter(note => note.owner_id === state.owner)
-        .sort((a, b) => a.id.localeCompare(b.id)).slice(from, to + 1).map(note => structuredClone(note)),
-      error: null,
-    })),
-  }
+  const from = vi.fn((table: string) => {
+    const filters: Array<(row: Record<string, unknown>) => boolean> = []
+    let key = 'id'
+    const query = {
+      select: () => query,
+      eq: (field: string, value: string) => {
+        filters.push(row => row[field] === value)
+        return query
+      },
+      order: (field: string) => { key = field; return query },
+      gt: (field: string, cursor: string) => { filters.push(row => String(row[field]) > cursor); return query },
+      is: (field: string, value: null) => { filters.push(row => row[field] === value); return query },
+      range: async (first: number, last: number) => {
+        if (table !== 'notes' && !state.supportsPurges) {
+          return { data: null, error: { message: 'Unknown table', code: 'PGRST205' } }
+        }
+        const tableRows = table === 'notes' ? [...remote.values()] : table === 'note_tombstones'
+          ? [...tombstones.values()] : [...cleanup.values()].filter(row => table !== 'pending_note_attachment_gc' || !row.cleaned_at)
+        const rows = tableRows as unknown as Record<string, unknown>[]
+        return { data: rows.filter(row => row.owner_id === state.owner && filters.every(filter => filter(row)))
+          .sort((a, b) => String(a[key]).localeCompare(String(b[key]))).slice(first, last + 1).map(row => structuredClone(row)), error: null }
+      },
+    }
+    return query
+  })
   const upload = vi.fn(async (path: string, blob: Blob) => {
     calls.push('upload')
+    if (cleanup.has(path)) return { data: null, error: { message: 'Retired object' } }
     images.set(path, blob)
     return { data: { path }, error: null }
   })
@@ -73,19 +138,23 @@ function fakeCloud(initial: CloudNote[] = []) {
     await hooks.afterDownload?.()
     return { data: images.get(path) ?? null, error: null }
   })
+  const remove = vi.fn(async (names: string[]) => {
+    for (const name of names) images.delete(name)
+    return { data: [], error: null as { message: string } | null }
+  })
   const client = {
     auth: {
       getUser: vi.fn(async () => ({ data: { user: { id: state.owner } }, error: null })),
       getSession: vi.fn(async () => ({ data: { session: { user: { id: state.owner } } }, error: null })),
     },
-    from: vi.fn(() => query), rpc,
-    storage: { from: vi.fn(() => ({ upload, download })) },
+    from, rpc,
+    storage: { from: vi.fn(() => ({ upload, download, remove })) },
   } as unknown as SupabaseClient
-  return { client, state, remote, images, calls, hooks, rpc, upload, download }
+  return { client, state, remote, images, tombstones, cleanup, calls, hooks, rpc, upload, download, remove, purgeRemote }
 }
 
 beforeEach(async () => {
-  await Promise.all([db.notes.clear(), db.images.clear(), db.settings.clear()])
+  await Promise.all(db.tables.map(table => table.clear()))
 })
 
 describe('local-first cloud synchronization', () => {
@@ -231,6 +300,159 @@ describe('local-first cloud synchronization', () => {
     cloud.rpc.mockClear()
     await syncNotes(cloud.client, otherOwner)
     expect(cloud.rpc).not.toHaveBeenCalled()
+  })
+})
+
+describe('permanent deletion', () => {
+  function photo() {
+    return { id: crypto.randomUUID(), name: '메모사진.webp', size: 4, width: 10, height: 10,
+      mime: 'image/webp' as const, createdAt: new Date().toISOString() }
+  }
+
+  it('moves selected local and own-account notes to the trash and purges only trashed notes', async () => {
+    const attachment = photo()
+    const local = await createNote(null, { attachments: [attachment] })
+    const cloud = await createNote(ownerId, { attachments: [attachment], pinned: true })
+    const unrelated = await createNote(otherOwner)
+    await db.images.put({ ...attachment, blob: new Blob(['webp']) })
+    expect(await purgeNotes([local.id], ownerId)).toBe(0)
+    expect(await trashNotes([local.id, cloud.id, unrelated.id, cloud.id], ownerId)).toBe(2)
+    expect((await db.notes.get(cloud.id))?.pinned).toBe(false)
+    expect((await db.notes.get(unrelated.id))?.deletedAt).toBeNull()
+    expect(await purgeNotes([local.id], ownerId)).toBe(1)
+    expect(await db.images.get(attachment.id)).toBeDefined()
+    expect(await db.pendingPurges.count()).toBe(0)
+    expect(await purgeNotes([cloud.id, unrelated.id], ownerId)).toBe(1)
+    expect(await db.images.get(attachment.id)).toBeUndefined()
+    expect(await db.pendingPurges.toArray()).toEqual([{
+      id: cloud.id, ownerId, attachmentNames: [`${ownerId}/${attachment.id}.webp`],
+    }])
+  })
+
+  it('keeps a purge queued without the migration, then applies it to an active cloud snapshot', async () => {
+    const shared = photo()
+    const detached = photo()
+    const orphan = photo()
+    const note = await createNote(ownerId, { attachments: [shared, detached, orphan], body: '이 기기에서 지움' })
+    const other = await createNote(ownerId, { attachments: [shared], body: '공유 첨부를 사용하는 메모' })
+    const cloud = fakeCloud([
+      cloudNote(note, { data: { ...content(note), attachments: [shared, detached] } }),
+      cloudNote(other),
+    ])
+    for (const file of [shared, detached, orphan]) {
+      const blob = new Blob(['webp'], { type: 'image/webp' })
+      await db.images.put({ ...file, blob })
+      cloud.images.set(`${ownerId}/${file.id}.webp`, blob)
+    }
+    await db.notes.update(other.id, { dirty: false, baseVersion: other.version })
+    await trashNotes([note.id], ownerId)
+    await purgeNotes([note.id], ownerId)
+    cloud.state.supportsPurges = false
+
+    expect(await syncNotes(cloud.client, ownerId)).toMatchObject({ pendingPurges: 1 })
+    expect(cloud.remote.has(note.id)).toBe(true)
+    expect(await db.notes.get(note.id)).toBeUndefined()
+    expect(await db.pendingPurges.count()).toBe(1)
+
+    cloud.state.supportsPurges = true
+    expect((await syncNotes(cloud.client, ownerId)).pendingPurges).toBeUndefined()
+    expect(cloud.remote.has(note.id)).toBe(false)
+    expect(cloud.tombstones.has(note.id)).toBe(true)
+    expect(await db.pendingPurges.count()).toBe(0)
+    expect(cloud.images.has(`${ownerId}/${shared.id}.webp`)).toBe(true)
+    expect(cloud.images.has(`${ownerId}/${detached.id}.webp`)).toBe(false)
+    expect(cloud.images.has(`${ownerId}/${orphan.id}.webp`)).toBe(false)
+    expect(await db.notes.get(other.id)).toBeDefined()
+  })
+
+  it('applies remote deletions to stale offline edits, without uploading or creating a conflict copy', async () => {
+    const attachment = photo()
+    const stale = await createNote(ownerId, { attachments: [attachment], body: '오프라인에서 편집' })
+    const unrelated = await createNote(otherOwner)
+    await db.images.put({ ...attachment, blob: new Blob(['webp']) })
+    const cloud = fakeCloud([cloudNote(stale)])
+    cloud.purgeRemote(stale.id)
+    cloud.tombstones.set(unrelated.id, { id: unrelated.id, owner_id: otherOwner })
+
+    expect(await syncNotes(cloud.client, ownerId)).toEqual({ uploaded: 0, downloaded: 0, conflicts: 0 })
+    expect(cloud.upload).not.toHaveBeenCalled()
+    expect(cloud.rpc).not.toHaveBeenCalled()
+    expect(await db.notes.toArray()).toEqual([unrelated])
+    expect(await db.images.get(attachment.id)).toBeUndefined()
+  })
+
+  it('honors a remote purge that arrives while a stale note upload is in flight', async () => {
+    const attachment = photo()
+    const stale = await createNote(ownerId, { attachments: [attachment], body: '응답을 기다리는 편집' })
+    await db.images.put({ ...attachment, blob: new Blob(['webp']) })
+    const cloud = fakeCloud([cloudNote(stale, { data: { ...content(stale), attachments: [] } })])
+    cloud.hooks.beforeSave = async () => { cloud.purgeRemote(stale.id) }
+
+    expect(await syncNotes(cloud.client, ownerId)).toEqual({ uploaded: 0, downloaded: 0, conflicts: 0 })
+    expect(await db.notes.get(stale.id)).toBeUndefined()
+    expect(cloud.remote.has(stale.id)).toBe(false)
+    expect(cloud.images.size).toBe(0)
+    expect(await db.images.get(attachment.id)).toBeUndefined()
+  })
+
+  it('keeps a concurrent local purge when an older attachment download completes', async () => {
+    const old = await createNote(ownerId, { deletedAt: new Date().toISOString() })
+    await db.notes.update(old.id, { dirty: false, baseVersion: old.version })
+    const attachment = photo()
+    const cloud = fakeCloud([cloudNote(old, {
+      version: crypto.randomUUID(),
+      data: { ...content(old), attachments: [attachment] },
+    })])
+    cloud.images.set(`${ownerId}/${attachment.id}.webp`, new Blob(['webp']))
+    cloud.hooks.afterDownload = async () => { await purgeNotes([old.id], ownerId) }
+
+    expect((await syncNotes(cloud.client, ownerId)).downloaded).toBe(0)
+    expect(await db.notes.get(old.id)).toBeUndefined()
+    expect(await db.images.get(attachment.id)).toBeUndefined()
+    expect(await db.pendingPurges.count()).toBe(1)
+    await syncNotes(cloud.client, ownerId)
+    expect(cloud.remote.has(old.id)).toBe(false)
+    expect(await db.pendingPurges.count()).toBe(0)
+  })
+
+  it('retries a Storage cleanup while keeping the note permanently removed', async () => {
+    const attachment = photo()
+    const note = await createNote(ownerId, { deletedAt: new Date().toISOString(), attachments: [attachment] })
+    const cloud = fakeCloud([cloudNote(note)])
+    const path = `${ownerId}/${attachment.id}.webp`
+    cloud.images.set(path, new Blob(['webp']))
+    await purgeNotes([note.id], ownerId)
+    cloud.remove.mockResolvedValueOnce({ data: [], error: { message: '연결 끊김' } })
+    const independent = await createNote(ownerId, { body: '별도 메모' })
+
+    await expect(syncNotes(cloud.client, ownerId)).rejects.toThrow('연결 끊김')
+    expect(cloud.remote.get(independent.id)?.data.body).toBe(independent.body)
+    expect(await db.pendingPurges.count()).toBe(0)
+    expect(cloud.remote.has(note.id)).toBe(false)
+    expect(cloud.cleanup.get(path)?.cleaned_at).toBeNull()
+    await syncNotes(cloud.client, ownerId)
+    expect(cloud.images.has(path)).toBe(false)
+    expect(cloud.cleanup.get(path)?.cleaned_at).toBeTruthy()
+  })
+
+  it('preserves the locally cached attachment of a surviving unsynced note when its old path is retired', async () => {
+    const attachment = photo()
+    const original = await createNote(ownerId, { attachments: [attachment] })
+    const surviving = await createNote(ownerId, { title: '독립 메모', attachments: [attachment] })
+    const cloud = fakeCloud([cloudNote(original)])
+    const path = `${ownerId}/${attachment.id}.webp`
+    const blob = new Blob(['webp'])
+    cloud.images.set(path, blob)
+    await db.images.put({ ...attachment, blob })
+    cloud.purgeRemote(original.id)
+
+    expect((await syncNotes(cloud.client, ownerId)).uploaded).toBe(1)
+    const savedFile = cloud.remote.get(surviving.id)?.data.attachments[0]
+    expect(savedFile?.name).toBe(attachment.name)
+    expect(savedFile?.id).not.toBe(attachment.id)
+    expect(cloud.images.has(`${ownerId}/${savedFile?.id}.webp`)).toBe(true)
+    expect(cloud.images.has(path)).toBe(false)
+    expect(await db.images.get(attachment.id)).toBeUndefined()
   })
 })
 

@@ -19,6 +19,12 @@
 - `push_subscriptions`는 본인의 기기만 등록·조회·해제할 수 있습니다.
 - `notes`를 기존 `supabase_realtime` publication에 추가합니다. Realtime 신호가 누락되어도 앱의 재동기화로 최신 데이터를 가져옵니다.
 
+### 기존 프로젝트에 영구 삭제 추가
+
+초기 설정과 [녹화 마이그레이션](../supabase/migrations/202611250001_recordings.sql)을 적용한 프로젝트에서 **SQL Editor → New query**를 열고 [영구 삭제 마이그레이션](../supabase/migrations/202611260001_permanent_delete.sql) 전체를 한 번 실행합니다. 같은 계정으로 연결한 기기는 다음 동기화 때 영구 삭제를 반영합니다. 오프라인에서 확인한 영구 삭제는 기기에 저장했다가 다시 연결하면 전송합니다.
+
+서버는 오프라인 기기의 옛 사본이 다시 저장되지 않도록 삭제 기록을 유지합니다. 첨부파일은 해당 계정의 남은 메모에서 참조하지 않을 때 정리합니다.
+
 ## 2. 이메일 로그인 URL
 
 **Authentication → URL Configuration**에 다음을 등록합니다. 경로 끝의 `/`까지 실제 앱 주소와 맞추세요.

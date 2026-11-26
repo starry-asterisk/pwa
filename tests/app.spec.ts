@@ -257,3 +257,94 @@ test('keeps the workspace, settings tabs, and note editor within 320px and 390px
     await expectNoHorizontalOverflow(page)
   }
 })
+
+test('moves and permanently deletes a selected batch only after confirmation', async ({ page }) => {
+  const fixture = await createPngFixture(page)
+  const first = await startNote(page, '첫 번째 삭제 메모', '첨부 파일도 함께 정리합니다.')
+  await first.getByLabel('이미지 파일 선택', { exact: true }).setInputFiles(fixture.path)
+  await expect(first.getByRole('img', { name: 'roundtrip.png', exact: true })).toBeVisible()
+  await finishNote(page)
+  await startNote(page, '두 번째 삭제 메모', '두 메모를 한 번에 선택합니다.')
+  await finishNote(page)
+
+  const note = (title: string, action: string) => page.getByRole('button', { name: `${title} ${action}`, exact: true })
+  await page.getByRole('button', { name: '선택', exact: true }).click()
+  await note('첫 번째 삭제 메모', '선택').press('Space')
+  await note('두 번째 삭제 메모', '선택').click()
+  await expect(page.getByText('2개 선택', { exact: true })).toBeVisible()
+
+  const search = page.getByRole('searchbox', { name: '메모 검색' })
+  await search.fill('두 번째')
+  await expect(note('두 번째 삭제 메모', '메모 열기')).toBeVisible()
+  await search.clear()
+  await page.getByRole('button', { name: '선택', exact: true }).click()
+
+  await note('첫 번째 삭제 메모', '선택').click()
+  await note('두 번째 삭제 메모', '선택').click()
+  await page.getByRole('button', { name: '휴지통으로 이동', exact: true }).click()
+  await expect(note('첫 번째 삭제 메모', '메모 열기')).toHaveCount(0)
+  await page.getByRole('navigation', { name: '메모 분류' }).getByRole('button', { name: /휴지통/ }).click()
+  await expect(note('두 번째 삭제 메모', '메모 열기')).toBeVisible()
+
+  await note('첫 번째 삭제 메모', '메모 열기').click()
+  const editor = page.getByRole('dialog', { name: '메모 편집', exact: true })
+  await editor.getByRole('button', { name: '영구 삭제', exact: true }).click()
+  const individualConfirmation = page.getByRole('dialog', { name: '메모 1개를 영구 삭제할까요?', exact: true })
+  await expect(individualConfirmation.getByRole('button', { name: '취소' })).toBeFocused()
+  await page.keyboard.press('Escape')
+  await expect(individualConfirmation).toHaveCount(0)
+  await expect(editor).toBeVisible()
+  await finishNote(page)
+
+  await page.getByRole('button', { name: '선택', exact: true }).click()
+  await note('첫 번째 삭제 메모', '선택').click()
+  await note('두 번째 삭제 메모', '선택').click()
+  const purge = page.getByRole('button', { name: '영구 삭제', exact: true })
+  await purge.click()
+  const confirmation = page.getByRole('dialog', { name: '메모 2개를 영구 삭제할까요?', exact: true })
+  await confirmation.getByRole('button', { name: '취소' }).click()
+  await expect(confirmation).toHaveCount(0)
+  await expect(page.getByText('2개 선택', { exact: true })).toBeVisible()
+  expect((await snapshot(page)).notes).toHaveLength(2)
+
+  await purge.click()
+  await confirmation.getByRole('button', { name: '영구 삭제', exact: true }).click()
+  await expect(page.getByRole('heading', { name: '휴지통이 비어 있어요' })).toBeVisible()
+  expect(await snapshot(page)).toEqual({ notes: [], images: [] })
+  await page.reload()
+  await expect(note('첫 번째 삭제 메모', '메모 열기')).toHaveCount(0)
+})
+
+test('touch long press selects a note without opening it and moving cancels selection', async ({ page }) => {
+  const title = '길게 눌러 선택할 메모'
+  await startNote(page, title, '카드를 눌러 이동한 뒤 다시 길게 누릅니다.')
+  await finishNote(page)
+  await page.setViewportSize({ width: 390, height: 650 })
+  const touch = await page.context().newCDPSession(page)
+  await touch.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 })
+
+  const card = page.getByRole('button', { name: `${title} 메모 열기`, exact: true })
+  const selectedCard = page.getByRole('button', { name: `${title} 선택`, exact: true })
+  const editor = page.getByRole('dialog', { name: '메모 편집', exact: true })
+  async function beginTouch() {
+    await card.scrollIntoViewIfNeeded()
+    const box = (await card.boundingBox())!
+    const point = { x: Math.round(box.x + 60), y: Math.round(box.y + 85) }
+    await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [point] })
+    return point
+  }
+  const point = await beginTouch()
+  await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ ...point, y: point.y - 48 }] })
+  await page.waitForTimeout(550)
+  await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+  await expect(selectedCard).toHaveCount(0)
+  await expect(editor).toHaveCount(0)
+
+  await beginTouch()
+  await expect(selectedCard).toHaveAttribute('aria-pressed', 'true')
+  await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+  await expect(page.getByText('1개 선택', { exact: true })).toBeVisible()
+  await expect(selectedCard).toHaveAttribute('aria-pressed', 'true')
+  await expect(editor).toHaveCount(0)
+  await expectNoHorizontalOverflow(page)
+})
